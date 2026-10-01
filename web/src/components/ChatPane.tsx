@@ -1,0 +1,564 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { api } from '../api';
+import { emitAck } from '../socket';
+import { useApp } from '../store';
+import { useCall } from './CallProvider';
+import { canDeleteMessage } from '../permissions';
+import { isRecord, unwrapUser, type Message, type User } from '../types';
+import { Avatar } from './Avatar';
+import { ConfirmModal } from './Modal';
+import { CallTargetModal } from './CallTargetModal';
+import { HashIcon, MenuIcon, PhoneIcon, SendIcon, TrashIcon, UsersIcon, VideoIcon, InfoIcon } from './icons';
+
+/* ---------------- formatting helpers ---------------- */
+
+const dayFmt = new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' });
+const timeFmt = new Intl.DateTimeFormat('ru-RU', { hour: '2-digit', minute: '2-digit' });
+
+function formatDay(ts: number): string {
+  const d = new Date(ts);
+  const now = new Date();
+  if (d.toDateString() === now.toDateString()) return 'Сегодня';
+  const y = new Date(now);
+  y.setDate(y.getDate() - 1);
+  if (d.toDateString() === y.toDateString()) return 'Вчера';
+  return dayFmt.format(d);
+}
+
+function pluralRu(n: number, one: string, few: string, many: string): string {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return one;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
+  return many;
+}
+
+function upsertMessage(list: Message[], incoming: Message, tempId?: string): Message[] {
+  if (list.some((m) => m.id === incoming.id)) return list;
+  const marker = tempId ?? incoming.tempId;
+  if (marker) {
+    const idx = list.findIndex((m) => m.id === marker);
+    if (idx >= 0) {
+      const next = [...list];
+      next[idx] = incoming;
+      return next;
+    }
+  }
+  return [...list, incoming];
+}
+
+interface TypingEntry {
+  name: string;
+}
+
+interface ChatPaneProps {
+  channelId: string;
+  onOpenNav: () => void;
+}
+
+export function ChatPane({ channelId, onOpenNav }: ChatPaneProps) {
+  const {
+    user,
+    socket,
+    detail,
+    dms,
+    online,
+    panelOpen,
+    panelTab,
+    openPanel,
+    closePanel,
+    toast,
+  } = useApp();
+  const { startCall } = useCall();
+
+  const dm = dms.find((d) => d.channel.id === channelId) ?? null;
+  const channel = detail?.channels.find((c) => c.id === channelId) ?? dm?.channel ?? null;
+
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [hasMore, setHasMore] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  const [draft, setDraft] = useState('');
+  const [typingUsers, setTypingUsers] = useState<Record<string, TypingEntry>>({});
+  const [deleteTarget, setDeleteTarget] = useState<Message | null>(null);
+  const [callKind, setCallKind] = useState<'video' | 'audio' | null>(null);
+
+  const listRef = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+  const atBottomRef = useRef(true);
+  const loadingOlderRef = useRef(false);
+  const messagesRef = useRef<Message[]>([]);
+  const typingTimers = useRef<Record<string, number>>({});
+  const lastTypingEmit = useRef(0);
+  const userRef = useRef<User | null>(user);
+  userRef.current = user;
+
+  messagesRef.current = messages;
+
+  const actorId = user?.id ?? '';
+  const actor = useMemo(() => ({ id: actorId, role: detail?.role ?? 'member' as const }), [actorId, detail]);
+
+  const scrollToBottom = useCallback(() => {
+    const el = listRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, []);
+
+  /* ------------- load messages on channel switch ------------- */
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setMessages([]);
+    setHasMore(false);
+    setTypingUsers({});
+    atBottomRef.current = true;
+    Object.values(typingTimers.current).forEach((t) => window.clearTimeout(t));
+    typingTimers.current = {};
+    void (async () => {
+      try {
+        const page = await api.getMessages(channelId);
+        if (cancelled) return;
+        setMessages(page.messages);
+        setHasMore(page.hasMore);
+        requestAnimationFrame(() => scrollToBottom());
+      } catch (e) {
+        if (!cancelled) {
+          toast(e instanceof Error ? e.message : 'Не удалось загрузить сообщения', 'error');
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [channelId, scrollToBottom, toast]);
+
+  /* ------------- socket: message:new + typing ------------- */
+
+  useEffect(() => {
+    if (!socket) return;
+
+    const onNew = (payload: unknown) => {
+      if (!isRecord(payload) || !isRecord(payload.message)) return;
+      const m = payload.message as unknown as Message;
+      if (m.channelId !== channelId || typeof m.id !== 'string') return;
+      const own = m.sender?.id !== undefined && m.sender.id === userRef.current?.id;
+      const shouldScroll = atBottomRef.current || own;
+      setMessages((prev) => upsertMessage(prev, m, m.tempId));
+      if (shouldScroll) requestAnimationFrame(() => {
+        const el = listRef.current;
+        if (el) el.scrollTop = el.scrollHeight;
+      });
+    };
+
+    const onTyping = (payload: unknown) => {
+      if (!isRecord(payload) || payload.channelId !== channelId) return;
+      const u = unwrapUser(payload.user);
+      if (!u || u.id === userRef.current?.id) return;
+      const existing = typingTimers.current[u.id];
+      if (existing) window.clearTimeout(existing);
+      if (payload.typing === true) {
+        setTypingUsers((prev) => ({ ...prev, [u.id]: { name: u.displayName } }));
+        typingTimers.current[u.id] = window.setTimeout(() => {
+          delete typingTimers.current[u.id];
+          setTypingUsers((prev) => {
+            if (!(u.id in prev)) return prev;
+            const { [u.id]: _drop, ...rest } = prev;
+            return rest;
+          });
+        }, 3600);
+      } else {
+        delete typingTimers.current[u.id];
+        setTypingUsers((prev) => {
+          if (!(u.id in prev)) return prev;
+          const { [u.id]: _drop, ...rest } = prev;
+          return rest;
+        });
+      }
+    };
+
+    socket.on('message:new', onNew);
+    socket.on('typing', onTyping);
+    return () => {
+      socket.off('message:new', onNew);
+      socket.off('typing', onTyping);
+      Object.values(typingTimers.current).forEach((t) => window.clearTimeout(t));
+      typingTimers.current = {};
+    };
+  }, [socket, channelId]);
+
+  /* ------------- pagination ------------- */
+
+  const loadOlder = useCallback(async () => {
+    if (!hasMore || loadingOlderRef.current) return;
+    const current = messagesRef.current;
+    if (current.length === 0) return;
+    loadingOlderRef.current = true;
+    setLoadingOlder(true);
+    const el = listRef.current;
+    const prevHeight = el?.scrollHeight ?? 0;
+    try {
+      const page = await api.getMessages(channelId, current[0].id);
+      setMessages((prev) => [
+        ...page.messages.filter((m) => !prev.some((p) => p.id === m.id)),
+        ...prev,
+      ]);
+      setHasMore(page.hasMore);
+      requestAnimationFrame(() => {
+        const node = listRef.current;
+        if (node) node.scrollTop += node.scrollHeight - prevHeight;
+      });
+    } catch (e) {
+      toast(e instanceof Error ? e.message : 'Не удалось загрузить сообщения', 'error');
+    } finally {
+      loadingOlderRef.current = false;
+      setLoadingOlder(false);
+    }
+  }, [channelId, hasMore, toast]);
+
+  const onScroll = useCallback(() => {
+    const el = listRef.current;
+    if (!el) return;
+    atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    if (el.scrollTop < 60 && hasMore && !loadingOlderRef.current) {
+      void loadOlder();
+    }
+  }, [hasMore, loadOlder]);
+
+  /* ------------- send ------------- */
+
+  const sendTypingOff = useCallback(() => {
+    if (socket && lastTypingEmit.current > 0) {
+      lastTypingEmit.current = 0;
+      socket.emit('typing', { channelId, typing: false });
+    }
+  }, [socket, channelId]);
+
+  const send = useCallback(async () => {
+    const text = draft.trim();
+    if (!text || !socket || !user) return;
+    const tempId = `tmp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const optimistic: Message = {
+      id: tempId,
+      channelId,
+      sender: {
+        id: user.id,
+        username: user.username,
+        displayName: user.displayName,
+        avatarColor: user.avatarColor,
+      },
+      text,
+      createdAt: Date.now(),
+      pending: true,
+      tempId,
+    };
+    setMessages((prev) => [...prev, optimistic]);
+    setDraft('');
+    if (composerRef.current) composerRef.current.style.height = 'auto';
+    atBottomRef.current = true;
+    requestAnimationFrame(() => {
+      const el = listRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    });
+    sendTypingOff();
+
+    const res = await emitAck<{ ok?: boolean; message?: Message; error?: string }>(
+      socket,
+      'message:send',
+      { channelId, text, tempId },
+    );
+    if (res.ok && res.message && typeof res.message.id === 'string') {
+      const incoming = { ...res.message, tempId };
+      setMessages((prev) => upsertMessage(prev, incoming, tempId));
+      requestAnimationFrame(() => {
+        const el = listRef.current;
+        if (el && atBottomRef.current) el.scrollTop = el.scrollHeight;
+      });
+    } else {
+      setMessages((prev) => prev.filter((m) => m.id !== tempId));
+      setDraft(text);
+      toast(res.error ?? 'Не удалось отправить сообщение', 'error');
+    }
+  }, [channelId, draft, sendTypingOff, socket, toast, user]);
+
+  const onDraftChange = (value: string) => {
+    setDraft(value);
+    if (!socket || !value.trim()) return;
+    const now = Date.now();
+    if (now - lastTypingEmit.current > 2000) {
+      lastTypingEmit.current = now;
+      socket.emit('typing', { channelId, typing: true });
+    }
+  };
+
+  const confirmDelete = async () => {
+    if (!deleteTarget) return;
+    try {
+      await api.deleteMessage(deleteTarget.id);
+      const id = deleteTarget.id;
+      setMessages((prev) => prev.filter((m) => m.id !== id));
+      setDeleteTarget(null);
+      toast('Сообщение удалено', 'success');
+    } catch (e) {
+      setDeleteTarget(null);
+      toast(e instanceof Error ? e.message : 'Не удалось удалить сообщение', 'error');
+    }
+  };
+
+  /* ------------- calls ------------- */
+
+  const requestCall = (kind: 'video' | 'audio') => {
+    if (!user) return;
+    if (dm) {
+      void startCall(
+        { id: dm.peer.id, name: dm.peer.displayName, color: dm.peer.avatarColor },
+        kind,
+        channelId,
+      );
+      return;
+    }
+    setCallKind(kind);
+  };
+
+  const pickCallTarget = (peer: { id: string; name: string; color: string }) => {
+    const kind = callKind;
+    setCallKind(null);
+    if (kind) void startCall(peer, kind, channelId);
+  };
+
+  /* ------------- header info ------------- */
+
+  const membersCount = detail?.members.length ?? 0;
+  const title = dm ? dm.peer.displayName : (channel?.name ? `#${channel.name}` : 'Чат');
+  const subtitle = dm
+    ? online.has(dm.peer.id)
+      ? 'в сети'
+      : 'не в сети'
+    : `${membersCount} ${pluralRu(membersCount, 'участник', 'участника', 'участников')}`;
+
+  const typingList = Object.values(typingUsers);
+  const typingText =
+    typingList.length === 1
+      ? `${typingList[0].name} печатает…`
+      : typingList.length === 2
+        ? `${typingList[0].name} и ${typingList[1].name} печатают…`
+        : typingList.length > 2
+          ? `${typingList[0].name} и ещё ${typingList.length - 1} печатают…`
+          : '';
+
+  /* ------------- render messages ------------- */
+
+  const renderMessages = () => {
+    if (loading) return <div className="empty-state">Загрузка…</div>;
+    if (messages.length === 0) {
+      return <div className="empty-state">Пока нет сообщений — напишите первым</div>;
+    }
+    let prevDay = '';
+    let prevAuthor = '';
+    return (
+      <>
+        {hasMore && (
+          <div className="load-more-wrap">
+            <button className="btn btn-ghost btn-sm" onClick={() => void loadOlder()}>
+              {loadingOlder ? 'Загрузка…' : 'Загрузить ещё'}
+            </button>
+          </div>
+        )}
+        {messages.map((m, i) => {
+          const day = formatDay(m.createdAt);
+          const showDay = day !== prevDay;
+          prevDay = day;
+          const own = m.sender.id === user?.id;
+          const showName = m.sender.id !== prevAuthor || showDay;
+          prevAuthor = m.sender.id;
+          const next = messages[i + 1];
+          const contiguous = !next || (next.sender.id === m.sender.id && formatDay(next.createdAt) === day);
+          const canDelete = canDeleteMessage(m.sender.id, actor);
+          return (
+            <div key={m.id}>
+              {showDay && (
+                <div className="msg-day">
+                  <span>{day}</span>
+                </div>
+              )}
+              <div
+                className={['msg-row', own ? 'own' : '', showName && !own ? 'with-name' : '']
+                  .filter(Boolean)
+                  .join(' ')}
+                style={contiguous ? undefined : { marginBottom: 6 }}
+              >
+                {!own &&
+                  (showName ? (
+                    <Avatar
+                      name={m.sender.displayName}
+                      color={m.sender.avatarColor}
+                      size={30}
+                    />
+                  ) : (
+                    <div style={{ width: 30, flex: 'none' }} />
+                  ))}
+                <div className="body">
+                  {showName && (
+                    <div className="msg-meta">
+                      <span className="msg-author" style={own ? undefined : { color: m.sender.avatarColor }}>
+                        {own ? 'Вы' : m.sender.displayName}
+                      </span>
+                      <span className="msg-time">{timeFmt.format(m.createdAt)}</span>
+                    </div>
+                  )}
+                  <div className={m.pending ? 'bubble pending' : 'bubble'}>{m.text}</div>
+                </div>
+                {canDelete && !m.pending && (
+                  <div className="msg-actions">
+                    <button
+                      className="icon-btn danger"
+                      title="Удалить сообщение"
+                      onClick={() => setDeleteTarget(m)}
+                    >
+                      <TrashIcon size={14} />
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </>
+    );
+  };
+
+  /* ------------- shell ------------- */
+
+  if (!channel && !dm) {
+    return (
+      <div className="chat">
+        <div className="chat-header">
+          <button className="icon-btn only-mobile" onClick={onOpenNav} title="Меню">
+            <MenuIcon />
+          </button>
+          <div className="title">Чат</div>
+        </div>
+        <div className="chat-placeholder">
+          <HashIcon size={34} />
+          <div>Выберите канал, чтобы начать общение</div>
+        </div>
+      </div>
+    );
+  }
+
+  const toggleMembers = () => {
+    if (panelOpen && panelTab === 'members') closePanel();
+    else openPanel('members');
+  };
+
+  return (
+    <div className="chat">
+      <div className="chat-header">
+        <button className="icon-btn only-mobile" onClick={onOpenNav} title="Меню">
+          <MenuIcon />
+        </button>
+        <div className="title">
+          {dm ? (
+            <Avatar name={dm.peer.displayName} color={dm.peer.avatarColor} size={26} />
+          ) : (
+            <HashIcon size={17} />
+          )}
+          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {title}
+          </span>
+          <span className="sub">{subtitle}</span>
+        </div>
+
+        {!dm && (
+          <button
+            className={
+              panelOpen && panelTab === 'members' ? 'members-toggle active' : 'members-toggle'
+            }
+            onClick={toggleMembers}
+            title="Участники"
+          >
+            <UsersIcon size={14} />
+            {membersCount}
+          </button>
+        )}
+
+        <div className="spacer" />
+
+        <button className="icon-btn" title="Видеозвонок" onClick={() => requestCall('video')}>
+          <VideoIcon size={17} />
+        </button>
+        <button className="icon-btn" title="Аудиозвонок" onClick={() => requestCall('audio')}>
+          <PhoneIcon size={16} />
+        </button>
+        <button
+          className="icon-btn"
+          title="Информация об организации"
+          onClick={() => (panelOpen && panelTab === 'info' ? closePanel() : openPanel('info'))}
+        >
+          <InfoIcon size={17} />
+        </button>
+      </div>
+
+      <div className="messages" ref={listRef} onScroll={onScroll}>
+        {renderMessages()}
+      </div>
+
+      <div className="typing-row">
+        {typingText && (
+          <>
+            <span className="typing-dots">
+              <i />
+              <i />
+              <i />
+            </span>
+            {typingText}
+          </>
+        )}
+      </div>
+
+      <form
+        className="composer"
+        onSubmit={(e) => {
+          e.preventDefault();
+          void send();
+        }}
+      >
+        <textarea
+          ref={composerRef}
+          rows={1}
+          placeholder="Напишите сообщение…"
+          value={draft}
+          onChange={(e) => {
+            onDraftChange(e.target.value);
+            e.target.style.height = 'auto';
+            e.target.style.height = `${Math.min(140, e.target.scrollHeight)}px`;
+          }}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault();
+              void send();
+            }
+          }}
+        />
+        <button className="send-btn" type="submit" disabled={!draft.trim()} title="Отправить">
+          <SendIcon size={17} />
+        </button>
+      </form>
+
+      {deleteTarget && (
+        <ConfirmModal
+          title="Удалить сообщение?"
+          text="Сообщение будет удалено для всех участников чата. Это действие нельзя отменить."
+          confirmLabel="Удалить"
+          onConfirm={confirmDelete}
+          onClose={() => setDeleteTarget(null)}
+        />
+      )}
+
+      {callKind && (
+        <CallTargetModal kind={callKind} onPick={pickCallTarget} onClose={() => setCallKind(null)} />
+      )}
+    </div>
+  );
+}

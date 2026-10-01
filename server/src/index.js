@@ -42,14 +42,14 @@ app.use('/api', (req, res) => {
 
 // ---------- static web build (SPA fallback) ----------
 const webDist = path.join(__dirname, '..', '..', 'web', 'dist')
-if (fs.existsSync(webDist)) {
-  app.use(express.static(webDist))
-  app.get('*', (req, res, next) => {
-    if (req.path.startsWith('/api') || req.path.startsWith('/socket.io')) return next()
-    res.sendFile(path.join(webDist, 'index.html'))
-  })
-  console.log(`[atrium] serving web statics from ${webDist}`)
-}
+app.use(express.static(webDist)) // no-op until web/dist exists (checked per request below)
+app.get('*', (req, res, next) => {
+  if (req.path.startsWith('/api') || req.path.startsWith('/socket.io')) return next()
+  const indexPath = path.join(webDist, 'index.html')
+  if (fs.existsSync(indexPath)) return res.sendFile(indexPath)
+  next()
+})
+console.log(`[atrium] serving web statics from ${webDist} (when built)`)
 
 // ---------- JSON body / error handling ----------
 app.use((err, req, res, next) => {
