@@ -14,6 +14,7 @@ import { DocumentsScreen } from './components/DocumentsScreen';
 import { ProfileScreen } from './components/ProfileScreen';
 import { WalletScreen } from './components/WalletScreen';
 import { AdminScreen } from './components/AdminScreen';
+import { BanBlocker } from './components/BanBlocker';
 import { Toasts } from './components/Toasts';
 import { HashIcon, MenuIcon } from './components/icons';
 import { Login } from './pages/Login';
@@ -115,6 +116,8 @@ function Shell() {
 
       <CallOverlay />
       <Toasts items={toasts} />
+      {/* поверх всего: поверх тостов и модалок (SPEC v7 §35) */}
+      <BanBlocker />
     </CallProvider>
   );
 }

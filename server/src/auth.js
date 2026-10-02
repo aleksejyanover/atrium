@@ -18,6 +18,18 @@ export function verifyToken(token) {
   }
 }
 
+/**
+ * SPEC v8 §35: the error text a banned account gets (login + any old token).
+ * Full form when the reason fields are known; legacy rows (no ban_reason /
+ * ban_by_name) fall back to the old short string.
+ */
+export function bannedMessage(row) {
+  const reason = row?.ban_reason
+  const byName = row?.ban_by_name
+  if (reason && byName) return `Аккаунт заблокирован. Вас забанил(а) ${byName}. Причина: ${reason}`
+  return 'Аккаунт заблокирован'
+}
+
 /** Express middleware: requires `Authorization: Bearer <token>`, sets req.user (public shape) + req.userId */
 export function requireAuth(req, res, next) {
   try {
@@ -28,7 +40,7 @@ export function requireAuth(req, res, next) {
     if (!userId) throw unauthorized('Недействительный или истёкший токен')
     const row = findUserById(userId)
     if (!row) throw unauthorized('Пользователь не найден')
-    if (row.banned) throw unauthorized('Аккаунт заблокирован') // SPEC v4 §23
+    if (row.banned) throw unauthorized(bannedMessage(row)) // SPEC v4 §23 + v8 §35
     req.user = publicUser(row)
     req.userId = row.id
     next()

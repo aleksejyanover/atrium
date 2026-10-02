@@ -117,6 +117,10 @@ export interface ServerToClientEvents {
     candidate: IceCandidatePayload;
   }) => void;
   'presence:update': (payload: { userId: string; online: boolean }) => void;
+  /** Снапшот всех сейчас онлайн при каждом подключении сокета (SPEC v8 §34). */
+  'presence:list': (payload: { userIds: string[] }) => void;
+  /** Вы заблокированы администратором: блокирующее окно + выход (SPEC v8 §35). */
+  'user:banned': (payload: { byName: string; reason: string }) => void;
 }
 
 export interface ClientToServerEvents {

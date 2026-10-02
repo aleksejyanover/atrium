@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { AppState } from 'react-native';
 import { io } from 'socket.io-client';
 
 import { API_URL } from '@/lib/api';
@@ -7,7 +8,7 @@ import { useAuth } from '@/state/auth';
 
 interface SocketContextValue {
   socket: AppSocket | null;
-  /** userId → online flag, fed by presence:update. */
+  /** userId → online flag, fed by presence:update / presence:list. */
   online: Record<string, boolean>;
   isOnline(userId: string | undefined | null): boolean;
 }
@@ -38,13 +39,40 @@ export function SocketProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (!socket) return;
-    const handler = (payload: { userId: string; online: boolean }) => {
+    const onUpdate = (payload: { userId: string; online: boolean }) => {
       setOnline((prev) => ({ ...prev, [payload.userId]: payload.online }));
     };
-    socket.on('presence:update', handler);
-    return () => {
-      socket.off('presence:update', handler);
+    // SPEC v8 §34: сервер присылает снапшот онлайн-пользователей при каждом
+    // подключении/реконнекте — объединяем его с картой, не затирая более
+    // свежие presence:update.
+    const onList = (payload: { userIds: string[] }) => {
+      if (!payload || !Array.isArray(payload.userIds)) return;
+      setOnline((prev) => {
+        const next = { ...prev };
+        for (const id of payload.userIds) next[id] = true;
+        return next;
+      });
     };
+    socket.on('presence:update', onUpdate);
+    socket.on('presence:list', onList);
+    return () => {
+      socket.off('presence:update', onUpdate);
+      socket.off('presence:list', onList);
+    };
+  }, [socket]);
+
+  // SPEC v8 §34 п.5: пробуждение приложения не должно оставлять мёртвый
+  // сокет — при возврате в 'active' принудительно переподключаемся.
+  useEffect(() => {
+    if (!socket) return;
+    // На web AppState может быть недоступен — проверяем перед подпиской.
+    if (!AppState || typeof AppState.addEventListener !== 'function' || !AppState.isAvailable) {
+      return;
+    }
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state === 'active' && !socket.connected) socket.connect();
+    });
+    return () => subscription.remove();
   }, [socket]);
 
   const value = useMemo<SocketContextValue>(

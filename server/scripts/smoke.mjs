@@ -651,6 +651,30 @@ async function main() {
     await off
   })
 
+  // SPEC v8 §34: every new connection gets a full presence snapshot
+  await check('§34: presence:list snapshot on connect contains peers online earlier', async () => {
+    const snapReg = await api('POST', '/api/auth/register', {
+      body: {
+        username: `snap_${RUN_ID}`,
+        displayName: 'Снапшот',
+        email: `snap_${RUN_ID}@test.local`,
+        password: 'secret123',
+      },
+    })
+    assert(snapReg.status === 201, `register status ${snapReg.status}`)
+    const sSnap = connect(snapReg.data.token)
+    sockets.push(sSnap)
+    const snapP = waitFor(sSnap, 'presence:list', () => true, 5000)
+    await connected(sSnap)
+    const snap = await snapP
+    assert(Array.isArray(snap?.userIds), `bad payload: ${JSON.stringify(snap)}`)
+    // peers connected BEFORE this socket must be in the snapshot
+    assert(snap.userIds.includes(u1.user.id), `u1 missing from snapshot: ${snap.userIds}`)
+    assert(snap.userIds.includes(u2.user.id), `u2 missing from snapshot: ${snap.userIds}`)
+    assert(snap.userIds.includes(snapReg.data.user.id), `self missing from snapshot: ${snap.userIds}`)
+    sSnap.disconnect()
+  })
+
   // ---------- member:joined / member:left / invite:new ----------
   await check('invite:new emitted to invitee sockets', async () => {
     const watcherReg = await api('POST', '/api/auth/register', {
@@ -1684,7 +1708,8 @@ async function main() {
     assert(restore.data.events.length === get.data.catalog.length, 'restore events failed')
   })
 
-  // ---------- ban / unban (§23) ----------
+  // ---------- ban / unban (§23 + SPEC v8 §35: mandatory reason + notification) ----------
+  const BAN_REASON = 'Нарушение правил: спам в #general'
   const banUser = await check('register user for ban test', async () => {
     const { status, data } = await api('POST', '/api/auth/register', {
       body: {
@@ -1701,49 +1726,105 @@ async function main() {
   const sAdmin = await connectAndTrack(adm.token)
   const sBan = await connectAndTrack(banUser.token)
 
-  await check('§23: ban -> admin:event only to superadmin, bot DM report, sockets dropped', async () => {
+  await check('§35: ban without reason -> 400 «Укажите причину блокировки», banned stays 0', async () => {
+    const noReason = await api('POST', `/api/admin/users/${banUser.user.id}/ban`, { token: adm.token })
+    assert(noReason.status === 400, `status ${noReason.status}`)
+    assert(noReason.data?.error === 'Укажите причину блокировки', `error: ${noReason.data?.error}`)
+
+    const blank = await api('POST', `/api/admin/users/${banUser.user.id}/ban`, {
+      token: adm.token, body: { reason: '   ' },
+    })
+    assert(blank.status === 400, `blank reason status ${blank.status}`)
+    assert(blank.data?.error === 'Укажите причину блокировки', `error: ${blank.data?.error}`)
+
+    const tooLong = await api('POST', `/api/admin/users/${banUser.user.id}/ban`, {
+      token: adm.token, body: { reason: 'x'.repeat(501) },
+    })
+    assert(tooLong.status === 400, `501-char reason status ${tooLong.status}`)
+
+    // ban NOT applied: victim still works, socket alive, list says banned:false
+    const me = await api('GET', '/api/me', { token: banUser.token })
+    assert(me.status === 200, `victim blocked without a reason: ${me.status}`)
+    assert(sBan.connected === true, 'victim socket dropped without a ban')
+    const list = await api('GET', `/api/admin/users?query=ban_${RUN_ID}`, { token: adm.token })
+    const row = (list.data.items || []).find((u) => u.username === `ban_${RUN_ID}`)
+    assert(row, 'victim not found in admin list')
+    assert(row.banned === false, `banned: ${row.banned}`)
+  })
+
+  await check('§35: ban with reason -> user:banned {byName, reason} BEFORE disconnect + admin:event + bot report', async () => {
     const adminEvtP = waitFor(sAdmin, 'admin:event', (p) => p?.item?.action === 'user.ban')
     const botMsgP = waitFor(
       sAdmin,
       'message:new',
       (p) => p?.message?.sender?.id === 'u_bot' && /Блокировка/.test(p.message?.text || '')
     )
+    const bannedEvtP = waitFor(sBan, 'user:banned', (p) => p?.reason === BAN_REASON)
     const banSocketP = waitFor(sBan, 'disconnect', () => true)
+    const order = []
+    sBan.on('user:banned', () => order.push('user:banned'))
+    sBan.on('disconnect', () => order.push('disconnect'))
     const spy = []
     const spyHandler = (p) => spy.push(p)
     s1.on('admin:event', spyHandler)
 
-    const { status, data } = await api('POST', `/api/admin/users/${banUser.user.id}/ban`, { token: adm.token })
+    const { status, data } = await api('POST', `/api/admin/users/${banUser.user.id}/ban`, {
+      token: adm.token, body: { reason: BAN_REASON },
+    })
     assert(status === 200, `ban status ${status}`)
     assert(data.ok === true && data.banned === true, `bad response: ${JSON.stringify(data)}`)
 
     const evt = await adminEvtP
     assert(evt.item?.action === 'user.ban', `admin:event action: ${evt.item?.action}`)
-    assert(typeof evt.item?.details === 'string' && evt.item.details.includes('Блокировка'), `details: ${evt.item?.details}`)
+    assert(typeof evt.item?.details === 'string' && evt.item.details.includes('заблокировал'), `details: ${evt.item?.details}`)
+    assert(evt.item.details.includes('Причина:'), `details lack reason: ${evt.item?.details}`)
+    assert(evt.item.details.includes(BAN_REASON), `details lack reason text: ${evt.item?.details}`)
+
+    const bannedEvt = await bannedEvtP
+    assert(bannedEvt.reason === BAN_REASON, `event reason: ${bannedEvt.reason}`)
+    const admMe = await api('GET', '/api/me', { token: adm.token })
+    assert(bannedEvt.byName === admMe.data.user?.displayName,
+      `byName: ${bannedEvt.byName} !== ${admMe.data.user?.displayName}`)
+
+    await banSocketP // active sockets of the banned user disconnected
+    assert(order[0] === 'user:banned' && order[1] === 'disconnect',
+      `order: ${order.join(' → ')} (event must arrive BEFORE disconnect)`)
 
     const msg = await botMsgP
     assert(typeof msg.message?.text === 'string', 'bot message has no text')
-    assert(msg.message.text.includes('Блокировка'), `bot text: ${msg.message.text}`)
-
-    await banSocketP // active sockets of the banned user disconnected
+    assert(msg.message.text.includes('Блокировка') && msg.message.text.includes(BAN_REASON),
+      `bot text: ${msg.message.text}`)
 
     await new Promise((r) => setTimeout(r, 300))
     assert(spy.length === 0, `admin:event leaked to non-superadmin socket (${spy.length} events)`)
     s1.off('admin:event', spyHandler)
+
+    // admin list carries banReason / banByName
+    const list = await api('GET', `/api/admin/users?query=ban_${RUN_ID}`, { token: adm.token })
+    const row = (list.data.items || []).find((u) => u.username === `ban_${RUN_ID}`)
+    assert(row && row.banned === true, `banned: ${row?.banned}`)
+    assert(row.banReason === BAN_REASON, `banReason: ${row?.banReason}`)
+    assert(typeof row.banByName === 'string' && row.banByName.length > 0, `banByName: ${row?.banByName}`)
   })
 
-  await check('§23: banned -> login 403 «Аккаунт заблокирован»', async () => {
+  await check('§35: banned -> login 403 with «забанил(а)» + reason text', async () => {
     const { status, data } = await api('POST', '/api/auth/login', {
       body: { login: `ban_${RUN_ID}`, password: 'secret123' },
     })
     assert(status === 403, `status ${status}`)
-    assert(data?.error === 'Аккаунт заблокирован', `error: ${data?.error}`)
+    assert(typeof data?.error === 'string', `error: ${data?.error}`)
+    assert(data.error.includes('Аккаунт заблокирован'), `error: ${data.error}`)
+    assert(data.error.includes('забанил'), `error: ${data.error}`)
+    assert(data.error.includes(BAN_REASON), `error: ${data.error}`)
   })
 
-  await check('§23: banned -> old token 401, socket reconnect refused', async () => {
+  await check('§35: banned -> old token 401 with the same text, socket reconnect refused', async () => {
     const me = await api('GET', '/api/me', { token: banUser.token })
     assert(me.status === 401, `status ${me.status}`)
-    assert(me.data?.error === 'Аккаунт заблокирован', `error: ${me.data?.error}`)
+    assert(typeof me.data?.error === 'string', `error: ${me.data?.error}`)
+    assert(me.data.error.includes('Аккаунт заблокирован'), `error: ${me.data.error}`)
+    assert(me.data.error.includes('забанил'), `error: ${me.data.error}`)
+    assert(me.data.error.includes(BAN_REASON), `error: ${me.data.error}`)
 
     const sock = connect(banUser.token)
     sockets.push(sock)
@@ -1756,9 +1837,16 @@ async function main() {
     sock.close()
   })
 
-  await check('§23: unban -> login works again', async () => {
+  await check('§35: unban -> reason cleared, login works again', async () => {
     const { status } = await api('POST', `/api/admin/users/${banUser.user.id}/unban`, { token: adm.token })
     assert(status === 200, `unban status ${status}`)
+
+    const list = await api('GET', `/api/admin/users?query=ban_${RUN_ID}`, { token: adm.token })
+    const row = (list.data.items || []).find((u) => u.username === `ban_${RUN_ID}`)
+    assert(row && row.banned === false, `banned: ${row?.banned}`)
+    assert(row.banReason === null, `banReason not cleared: ${row?.banReason}`)
+    assert(row.banByName === null, `banByName not cleared: ${row?.banByName}`)
+
     const login = await api('POST', '/api/auth/login', { body: { login: `ban_${RUN_ID}`, password: 'secret123' } })
     assert(login.status === 200, `login after unban: ${login.status} ${JSON.stringify(login.data)}`)
     const me = await api('GET', '/api/me', { token: login.data.token })
@@ -2342,6 +2430,61 @@ async function main() {
 
     const w = await api('GET', '/api/wallet', { token: u2.token })
     assert(w.data.balance === 5400, `wallet: ${w.data.balance}`)
+  })
+
+  // ============================================================
+  // SPEC v8 §34 — offline callee: call:invite waits instead of instant 409
+  // ============================================================
+  const peer34 = await check('§34: register offline callee + join the org', async () => {
+    const data = await reg('p34', 'Тихий Собеседник')
+    const inv = await api('POST', `/api/orgs/${orgId}/invite`, {
+      token: u1.token, body: { usernameOrEmail: `p34_${RUN_ID}`, role: 'member' },
+    })
+    assert(inv.status === 201, `invite status ${inv.status}: ${JSON.stringify(inv.data)}`)
+    const acc = await api('POST', `/api/invites/${inv.data.invite.id}/accept`, {
+      token: data.token, body: { signatureDataUrl: FAKE_PNG, signedName: 'Тихий Собеседник' },
+    })
+    assert(acc.status === 200, `accept status ${acc.status}: ${JSON.stringify(acc.data)}`)
+    return data // no socket yet → the callee is offline
+  })
+
+  let sPeer34
+  await check('§34: callee offline at invite, connects ~2s later -> ack {ok} (no 409)', async () => {
+    const started = Date.now()
+    const inviteP = ack(s1, 'call:invite', { calleeId: peer34.user.id, kind: 'audio' }, 12000)
+    // callee's socket is DOWN right now → the server must wait, not refuse
+    await new Promise((r) => setTimeout(r, 2000))
+    sPeer34 = await connectAndTrack(peer34.token) // comes online inside the 6s window
+    const incomingP = waitFor(sPeer34, 'call:incoming', (p) => p?.callId, 5000)
+
+    const res = await inviteP
+    assert(res.ok === true && typeof res.callId === 'string' && res.callId,
+      `invite ack must succeed: ${JSON.stringify(res)}`)
+    assert(Date.now() - started < 6000, `invite took ${Date.now() - started}ms — must not hit the 409 window`)
+
+    const incoming = await incomingP
+    assert(incoming.callId === res.callId, `incoming callId: ${incoming.callId}`)
+
+    // hang up so no call state leaks into the remaining checks
+    const leave = await ack(s1, 'call:leave', { callId: res.callId })
+    assert(leave.ok === true, `leave: ${JSON.stringify(leave)}`)
+  })
+
+  await check('§34: callee never connects -> single 409 after ~6s with the new message', async () => {
+    // bring the callee offline race-free: watcher attached BEFORE the disconnect
+    const offP = waitFor(s1, 'presence:update', (p) => p?.userId === peer34.user.id && p?.online === false, 5000)
+    sPeer34.disconnect()
+    await offP
+
+    const started = Date.now()
+    const res = await ack(s1, 'call:invite', { calleeId: peer34.user.id, kind: 'audio' }, 12000)
+    const elapsed = Date.now() - started
+
+    assert(res.error, `expected 409-style error, got: ${JSON.stringify(res)}`)
+    assert(res.error.includes('Пользователь не в сети'), `error: ${res.error}`)
+    assert(res.error.includes('приложение собеседника'), `error: ${res.error}`)
+    assert(elapsed >= 5000, `answered too fast (${elapsed}ms) — must wait ~6s for the callee`)
+    assert(elapsed <= 8000, `waited too long (${elapsed}ms) — ~6–7s expected`)
   })
 }
 

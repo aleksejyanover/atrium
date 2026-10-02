@@ -187,6 +187,10 @@ ensureColumn('users', 'is_owner', 'INTEGER DEFAULT 0') // card owner: infinite m
 ensureColumn('users', 'card_number', 'TEXT') // '4242' + 12 digits, only for is_owner
 ensureColumn('users', 'card_pin', 'TEXT') // 4 digits, only for is_owner
 
+// ---- SPEC v8 §35: ban reason + banning admin ----
+ensureColumn('users', 'ban_reason', 'TEXT') // причина блокировки (1–500)
+ensureColumn('users', 'ban_by_name', 'TEXT') // display_name банящего админа на момент бана
+
 /** Run fn inside a single SQLite transaction (all balance mutations, SPEC v4 §24). */
 export function transaction(fn) {
   return db.transaction(fn)()

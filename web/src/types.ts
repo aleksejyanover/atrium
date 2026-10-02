@@ -364,6 +364,10 @@ export interface LoginItem {
 /** `GET /api/admin/users` row. */
 export interface AdminUserRow extends User {
   banned: boolean;
+  /** Причина блокировки (SPEC v7 §35); `null` у старых банов. */
+  banReason: string | null;
+  /** Кто забанил — display_name на момент бана (SPEC v7 §35). */
+  banByName: string | null;
   lastLoginAt: number | null;
   orgsCount: number;
   balance: number;

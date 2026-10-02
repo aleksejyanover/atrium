@@ -17,7 +17,7 @@ import {
   type LoginItem,
 } from '../types';
 import { Avatar } from './Avatar';
-import { ConfirmModal } from './Modal';
+import { Modal } from './Modal';
 import { OwnerBadge } from './OwnerBadge';
 import { Toggle } from './Toggle';
 import {
@@ -456,6 +456,9 @@ function UsersTab() {
   const [items, setItems] = useState<AdminUserRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [banTarget, setBanTarget] = useState<AdminUserRow | null>(null);
+  const [banReason, setBanReason] = useState('');
+  const [banError, setBanError] = useState<string | null>(null);
+  const [banBusy, setBanBusy] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
 
   useEffect(() => {
@@ -477,26 +480,44 @@ function UsersTab() {
     void load();
   }, [load]);
 
+  const openBan = (target: AdminUserRow) => {
+    setBanReason('');
+    setBanError(null);
+    setBanTarget(target);
+  };
+
+  /** SPEC v7 §35: причина обязательна (trim, 1–500), иначе сервер ответит 400. */
   const ban = async () => {
     const target = banTarget;
-    setBanTarget(null);
     if (!target) return;
-    setBusyId(target.id);
+    const reason = banReason.trim();
+    if (reason.length < 1) {
+      setBanError('Укажите причину блокировки');
+      return;
+    }
+    if (reason.length > 500) {
+      setBanError('Причина блокировки — не более 500 символов');
+      return;
+    }
+    setBanBusy(true);
     try {
-      await api.adminBan(target.id);
+      await api.adminBan(target.id, reason);
+      setBanTarget(null);
       toast(`Пользователь ${target.displayName} заблокирован`, 'success');
       await load();
     } catch (e) {
-      // SPEC v5 §29.3: 409 → сервер отвечает «Владельца нельзя заблокировать»
+      // 400 «Укажите причину…», 409 «Владельца нельзя заблокировать» и пр. —
+      // показываем серверный текст (тостом + внутри модалки).
       const message =
         e instanceof ApiError && e.status === 409
           ? e.message || 'Владельца нельзя заблокировать'
           : e instanceof Error
             ? e.message
             : 'Не удалось заблокировать';
+      setBanError(message);
       toast(message, 'error');
     } finally {
-      setBusyId(null);
+      setBanBusy(false);
     }
   };
 
@@ -535,6 +556,11 @@ function UsersTab() {
 
       {items?.map((u) => {
         const isSelf = u.id === user?.id;
+        const banTitle = u.banReason
+          ? u.banByName
+            ? `${u.banReason} · Забанил(а): ${u.banByName}`
+            : u.banReason
+          : (u.banByName ?? '');
         return (
           <div className="user-row" key={u.id}>
             <Avatar name={u.displayName} color={u.avatarColor} size={34} />
@@ -544,6 +570,12 @@ function UsersTab() {
                 {u.isOwner && <OwnerBadge />}
                 {u.banned && <span className="status-badge rejected user-badge">Заблокирован</span>}
               </div>
+              {u.banned && (u.banReason || u.banByName) && (
+                <div className="ban-reason" title={banTitle}>
+                  Причина: {u.banReason ?? 'не указана'}
+                  {u.banByName ? ` · Забанил(а): ${u.banByName}` : ''}
+                </div>
+              )}
               <div className="audit-meta">
                 {balanceText(u.balance)} · {u.orgsCount}{' '}
                 {u.orgsCount === 1 ? 'организация' : 'организаций'} · вход{' '}
@@ -563,7 +595,7 @@ function UsersTab() {
                 <button
                   className="btn btn-danger btn-sm"
                   disabled={busyId === u.id}
-                  onClick={() => setBanTarget(u)}
+                  onClick={() => openBan(u)}
                 >
                   <BanIcon size={13} /> Бан
                 </button>
@@ -573,13 +605,45 @@ function UsersTab() {
       })}
 
       {banTarget && (
-        <ConfirmModal
+        <Modal
           title="Заблокировать пользователя?"
-          text={`Пользователь ${banTarget.displayName} (@${banTarget.username}) потеряет доступ: активные сессии будут отключены, войти не сможет.`}
-          confirmLabel="Заблокировать"
-          onConfirm={ban}
-          onClose={() => setBanTarget(null)}
-        />
+          subtitle={`Пользователь ${banTarget.displayName} (@${banTarget.username}) потеряет доступ.`}
+          onClose={() => {
+            if (!banBusy) setBanTarget(null);
+          }}
+          footer={
+            <>
+              <button className="btn btn-ghost" disabled={banBusy} onClick={() => setBanTarget(null)}>
+                Отмена
+              </button>
+              <button
+                className="btn btn-danger-filled"
+                disabled={banBusy || banReason.trim().length === 0}
+                onClick={() => void ban()}
+              >
+                {banBusy ? 'Блокировка…' : 'Заблокировать'}
+              </button>
+            </>
+          }
+        >
+          <div className="field">
+            <label htmlFor="ban-reason">Причина блокировки</label>
+            <textarea
+              id="ban-reason"
+              className="textarea"
+              value={banReason}
+              maxLength={500}
+              placeholder="Напишите, за что пользователь заблокирован…"
+              onChange={(e) => {
+                setBanReason(e.target.value);
+                setBanError(null);
+              }}
+            />
+            <div className="char-counter">{banReason.trim().length} / 500</div>
+          </div>
+          <div className="ban-warning">⚠️ активные сессии будут отключены</div>
+          {banError && <div className="form-error">{banError}</div>}
+        </Modal>
       )}
     </>
   );

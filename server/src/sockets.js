@@ -18,6 +18,11 @@ const socketsByUser = new Map() // userId -> Set<socketId>
 const onlineUsers = new Set()
 let mainIo = null // set in initSockets — used by admin ban (SPEC v4 §23)
 
+// SPEC v8 §34: offline callee wait for call:invite
+const CALL_OFFLINE_WAIT_MS = 6000 // wait up to 6s for the callee to come online
+const CALL_OFFLINE_POLL_MS = 400 // poll presence every 400ms (async, non-blocking)
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
 /** Online users count for GET /api/admin/stats. */
 export function onlineCount() {
   return onlineUsers.size
@@ -83,8 +88,19 @@ function attachCalls(socket, io, userId) {
   const ack = (res) => typeof res === 'function' ? res : () => {}
 
   // call:invite {calleeId, kind, channelId?} -> {ok, callId}
-  socket.on('call:invite', (payload, res) => {
+  // SPEC v8 §34: when the callee is offline we do NOT fail instantly — wait up to
+  // CALL_OFFLINE_WAIT_MS (polling every CALL_OFFLINE_POLL_MS, async → event loop is
+  // never blocked). Callee appears → normal scenario; still offline → single 409
+  // with the clearer message. Exactly one ack reply is sent (guarded), and if the
+  // caller disconnects mid-wait no call is created at all.
+  socket.on('call:invite', async (payload, res) => {
     const reply = ack(res)
+    let replied = false
+    const replyOnce = (obj) => {
+      if (replied) return
+      replied = true
+      reply(obj)
+    }
     try {
       const body = payload || {}
       const calleeId = str(body.calleeId)
@@ -102,8 +118,30 @@ function attachCalls(socket, io, userId) {
         userId, calleeId
       )
       if (!shared) throw new HttpError(403, 'Пользователь не состоит с вами в одной организации')
-      if (!isOnline(calleeId)) throw new HttpError(409, 'Пользователь не в сети')
 
+      // SPEC v8 §34: offline callee → wait for him to (re)connect before giving up
+      if (!isOnline(calleeId)) {
+        const deadline = Date.now() + CALL_OFFLINE_WAIT_MS
+        let cancelled = false
+        const cancel = () => { cancelled = true }
+        socket.once('disconnect', cancel)
+        try {
+          while (!isOnline(calleeId) && !cancelled && Date.now() < deadline) {
+            await sleep(CALL_OFFLINE_POLL_MS)
+          }
+        } finally {
+          socket.off('disconnect', cancel)
+        }
+        if (cancelled) {
+          // caller vanished mid-wait: nobody to answer, never double-process
+          return replyOnce({ error: 'Вызов отменён' })
+        }
+        if (!isOnline(calleeId)) {
+          throw new HttpError(409, 'Пользователь не в сети — приложение собеседника, похоже, закрыто или свёрнуто')
+        }
+      }
+
+      // busy-state checks are re-run after a possible wait (state may have changed)
       if (callByUser.has(calleeId)) throw new HttpError(409, 'Пользователь уже разговаривает')
       if (callByUser.has(userId)) throw new HttpError(409, 'Вы уже разговариваете')
 
@@ -128,9 +166,9 @@ function attachCalls(socket, io, userId) {
         kind,
         channelId,
       })
-      reply({ ok: true, callId })
+      replyOnce({ ok: true, callId })
     } catch (err) {
-      reply({ error: err.message || 'Ошибка вызова' })
+      replyOnce({ error: err.message || 'Ошибка вызова' })
     }
   })
 
@@ -248,6 +286,9 @@ export function initSockets(io) {
     if (firstConnect) {
       io.emit('presence:update', { userId: user.id, online: true })
     }
+    // SPEC v8 §34: full presence snapshot to the connecting socket
+    // (every connect/reconnect — the client never has to guess who is online)
+    socket.emit('presence:list', { userIds: [...onlineUsers] })
 
     // ---------- message:send ----------
     socket.on('message:send', (payload, res) => {

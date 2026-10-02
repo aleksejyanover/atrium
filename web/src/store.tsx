@@ -43,6 +43,12 @@ export type View =
 
 export type PanelTab = 'members' | 'invites' | 'activity' | 'roles' | 'info' | 'finance';
 
+/** Данные экрана «Вас забанили» (SPEC v7 §35, событие `user:banned`). */
+export interface BanNotice {
+  byName: string;
+  reason: string;
+}
+
 export interface AppStore {
   booted: boolean;
   bootError: string | null;
@@ -56,6 +62,8 @@ export interface AppStore {
   dmsLoaded: boolean;
   invites: IncomingInvite[];
   online: Set<string>;
+  /** Непустое, пока показывается полноэкранный блок «Вас забанил(а) …». */
+  banNotice: BanNotice | null;
 
   /* SPEC v2 §14.3–14.4 — applications & dismissal documents */
   myApplications: MyApplication[];
@@ -123,6 +131,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [dmsLoaded, setDmsLoaded] = useState(false);
   const [invites, setInvites] = useState<IncomingInvite[]>([]);
   const [online, setOnline] = useState<Set<string>>(() => new Set());
+  const [banNotice, setBanNotice] = useState<BanNotice | null>(null);
 
   const [myApplications, setMyApplications] = useState<MyApplication[]>([]);
   const [incomingApplications, setIncomingApplications] = useState<IncomingApplication[]>([]);
@@ -464,6 +473,42 @@ export function AppProvider({ children }: { children: ReactNode }) {
       });
     };
 
+    /**
+     * SPEC v7 §34: сервер шлёт снапшот онлайн-пользователей при каждом
+     * подключении — объединяем в ту же карту, ничего не затирая
+     * (`presence:update` остаётся источником офлайн-событий).
+     */
+    const onPresenceList = (payload: unknown) => {
+      if (!isRecord(payload) || !Array.isArray(payload.userIds)) return;
+      const ids = payload.userIds.filter((v): v is string => typeof v === 'string');
+      if (ids.length === 0) return;
+      setOnline((prev) => {
+        let changed = false;
+        const next = new Set(prev);
+        for (const id of ids) {
+          if (!next.has(id)) {
+            next.add(id);
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
+    };
+
+    /* ---- SPEC v7 §35: жертва бана получает user:banned {byName, reason} ---- */
+
+    const onUserBanned = (payload: unknown) => {
+      const byName =
+        isRecord(payload) && typeof payload.byName === 'string' && payload.byName.trim()
+          ? payload.byName
+          : 'администратор';
+      const reason =
+        isRecord(payload) && typeof payload.reason === 'string' && payload.reason.trim()
+          ? payload.reason
+          : 'причина не указана';
+      setBanNotice({ byName, reason });
+    };
+
     /* ---- unread bump on incoming messages ---- */
 
     const onNewMessage = (payload: unknown) => {
@@ -582,6 +627,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     socket.on('role:changed', onMemberEvent);
     socket.on('channel:created', onChannelCreated);
     socket.on('presence:update', onPresence);
+    socket.on('presence:list', onPresenceList);
+    socket.on('user:banned', onUserBanned);
     socket.on('message:new', onNewMessage);
     socket.on('application:new', onApplicationNew);
     socket.on('application:update', onApplicationUpdate);
@@ -596,6 +643,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       socket.off('role:changed', onMemberEvent);
       socket.off('channel:created', onChannelCreated);
       socket.off('presence:update', onPresence);
+      socket.off('presence:list', onPresenceList);
+      socket.off('user:banned', onUserBanned);
       socket.off('message:new', onNewMessage);
       socket.off('application:new', onApplicationNew);
       socket.off('application:update', onApplicationUpdate);
@@ -678,6 +727,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     dmsLoaded,
     invites,
     online,
+    banNotice,
     myApplications,
     incomingApplications,
     myDocuments,

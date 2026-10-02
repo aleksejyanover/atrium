@@ -8,7 +8,7 @@ import {
   run,
   get,
 } from '../db.js'
-import { signToken, requireAuth } from '../auth.js'
+import { signToken, requireAuth, bannedMessage } from '../auth.js'
 import { logAudit, requestInfo } from '../audit.js'
 import {
   newId,
@@ -137,7 +137,7 @@ router.post('/auth/login', (req, res, next) => {
     }
 
     if (row.banned) {
-      // SPEC v4 §23: banned accounts cannot log in
+      // SPEC v4 §23: banned accounts cannot log in; SPEC v8 §35: «Вас забанил(а) …»
       writeLoginLog(row.id, false)
       logAudit({
         actorId: row.id,
@@ -146,7 +146,7 @@ router.post('/auth/login', (req, res, next) => {
         botText: `⛔ Вход отклонён: ${login} (аккаунт заблокирован)`,
         botSubject: login,
       })
-      throw forbidden('Аккаунт заблокирован')
+      throw forbidden(bannedMessage(row))
     }
 
     const now = Date.now()

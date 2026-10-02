@@ -354,6 +354,8 @@ function normalizeAdminUser(raw: unknown): AdminUserRow | null {
   return {
     ...u,
     banned: raw.banned === true,
+    banReason: typeof raw.banReason === 'string' ? raw.banReason : null,
+    banByName: typeof raw.banByName === 'string' ? raw.banByName : null,
     lastLoginAt: typeof raw.lastLoginAt === 'number' ? raw.lastLoginAt : null,
     orgsCount: typeof raw.orgsCount === 'number' ? raw.orgsCount : 0,
     balance: typeof raw.balance === 'number' ? raw.balance : 0,
@@ -868,8 +870,9 @@ export const api = {
       .filter((u): u is AdminUserRow => u !== null);
   },
 
-  adminBan(id: string): Promise<{ ok: true; banned: true }> {
-    return post<{ ok: true; banned: true }>(`/api/admin/users/${id}/ban`);
+  /** SPEC v7 §35: `{reason}` обязателен (trim, 1–500), иначе 400 «Укажите причину блокировки». */
+  adminBan(id: string, reason: string): Promise<{ ok: true; banned: true }> {
+    return post<{ ok: true; banned: true }>(`/api/admin/users/${id}/ban`, { reason });
   },
 
   adminUnban(id: string): Promise<{ ok: true; banned: false }> {

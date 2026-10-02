@@ -1,3 +1,6 @@
+import { useRef, useState } from 'react';
+
+import { BanOverlay } from '@/components/ban-overlay';
 import { rub } from '@/lib/format';
 import { useAuth } from '@/state/auth';
 import { useOrgs } from '@/state/orgs';
@@ -5,17 +8,28 @@ import { useSocketEvent } from '@/state/socket';
 import { useToast } from '@/state/toast';
 
 /**
- * Глобальная обработка новых socket-событий SPEC v2/v3/v4 (§13, §18, §24):
+ * Глобальная обработка новых socket-событий SPEC v2/v3/v4/v8 (§13, §18, §24, §35):
  * application:new/update, document:new/update, wallet:updated → тосты +
- * обновление бейджей и списков без перезагрузки.
+ * обновление бейджей и списков без перезагрузки; user:banned → блокирующее окно.
  *
  * Монтируется внутри ToastProvider; входящие приглашения (invite:new)
  * обрабатываются на экранах — здесь их нет, чтобы не дублировать тосты.
  */
 export function RealtimeProvider({ children }: { children: React.ReactNode }) {
   const { show } = useToast();
-  const { user, refreshMe } = useAuth();
+  const { user, refreshMe, logout } = useAuth();
   const { refresh } = useOrgs();
+
+  // SPEC v8 §35: блокирующее окно бана — показывается один раз на сессию,
+  // сбрасывается при выходе по кнопке «Выйти» (единственный путь закрытия).
+  const [ban, setBan] = useState<{ byName: string; reason: string } | null>(null);
+  const banShownRef = useRef(false);
+
+  useSocketEvent('user:banned', (payload) => {
+    if (banShownRef.current) return;
+    banShownRef.current = true;
+    setBan({ byName: payload.byName, reason: payload.reason });
+  });
 
   useSocketEvent('application:new', (payload) => {
     const name = payload.org?.name;
@@ -84,5 +98,21 @@ export function RealtimeProvider({ children }: { children: React.ReactNode }) {
     // здесь только обновляем баланс, чтобы не дублировать.
   });
 
-  return <>{children}</>;
+  return (
+    <>
+      {children}
+      {ban ? (
+        <BanOverlay
+          byName={ban.byName}
+          reason={ban.reason}
+          onExit={() => {
+            // Выход: сбрасываем окно и флаг, затем токен → экран входа.
+            banShownRef.current = false;
+            setBan(null);
+            void logout();
+          }}
+        />
+      ) : null}
+    </>
+  );
 }

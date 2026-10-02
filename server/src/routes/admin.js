@@ -4,6 +4,7 @@ import { requireAuth, requireAdmin } from '../auth.js'
 import { auditDto, logAudit } from '../audit.js'
 import { getBotSettings, setBotSettings, BOT_EVENTS } from '../bot.js'
 import { onlineCount, disconnectUserSockets } from '../sockets.js'
+import { emitToUser } from '../bus.js'
 import { publicUser, bad, conflict, notFound, str } from '../util.js'
 
 const router = Router()
@@ -130,6 +131,8 @@ router.get('/admin/users', (req, res, next) => {
       items: rows.map((r) => ({
         ...publicUser(r),
         banned: !!r.banned,
+        banReason: r.ban_reason ?? null, // SPEC v8 §35
+        banByName: r.ban_by_name ?? null, // SPEC v8 §35
         lastLoginAt: r.last_login_at ?? null,
         orgsCount: get('SELECT COUNT(*) AS c FROM members WHERE user_id = ?', r.id).c,
         balance: r.balance ?? 0,
@@ -140,7 +143,7 @@ router.get('/admin/users', (req, res, next) => {
   }
 })
 
-// POST /api/admin/users/:id/ban -> {ok:true, banned:true} (§23)
+// POST /api/admin/users/:id/ban -> {ok:true, banned:true} (§23 + SPEC v8 §35)
 router.post('/admin/users/:id/ban', (req, res, next) => {
   try {
     const target = findUserById(req.params.id)
@@ -149,14 +152,28 @@ router.post('/admin/users/:id/ban', (req, res, next) => {
     // SPEC v5 §29: card owners are protected from bans
     if (target.is_owner) throw conflict('Владельца нельзя заблокировать')
 
-    run('UPDATE users SET banned = 1 WHERE id = ?', target.id)
+    // SPEC v8 §35: {reason} is mandatory — trim, 1..500 chars, else 400 (ban NOT set)
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : ''
+    if (!reason || reason.length > 500) throw bad('Укажите причину блокировки')
+
+    const actor = findUserById(req.userId)
+    const byName = (actor && (actor.display_name || actor.username)) || 'Администратор'
+
+    run(
+      'UPDATE users SET banned = 1, ban_reason = ?, ban_by_name = ? WHERE id = ?',
+      reason, byName, target.id
+    )
+
+    // SPEC v8 §35: notify the victim BEFORE her sockets are dropped
+    emitToUser(target.id, 'user:banned', { byName, reason })
     const dropped = disconnectUserSockets(target.id) // active sockets off immediately
 
     logAudit({
       actorId: req.userId,
       targetUserId: target.id,
       action: 'user.ban',
-      details: `Блокировка пользователя: ${target.display_name} (@${target.username})`,
+      details: `🚫 ${byName} заблокировал(а) ${target.display_name} (@${target.username}). Причина: ${reason}`,
+      botText: `⛔ Блокировка: ${byName} заблокировал(а) ${target.display_name} (@${target.username}). Причина: ${reason}`,
       botSubject: target.username,
     })
     res.json({ ok: true, banned: true, disconnected: dropped })
@@ -165,13 +182,13 @@ router.post('/admin/users/:id/ban', (req, res, next) => {
   }
 })
 
-// POST /api/admin/users/:id/unban -> {ok:true, banned:false} (§23)
+// POST /api/admin/users/:id/unban -> {ok:true, banned:false} (§23 + SPEC v8 §35: reason cleared)
 router.post('/admin/users/:id/unban', (req, res, next) => {
   try {
     const target = findUserById(req.params.id)
     if (!target) throw notFound('Пользователь не найден')
 
-    run('UPDATE users SET banned = 0 WHERE id = ?', target.id)
+    run('UPDATE users SET banned = 0, ban_reason = NULL, ban_by_name = NULL WHERE id = ?', target.id)
     logAudit({
       actorId: req.userId,
       targetUserId: target.id,
