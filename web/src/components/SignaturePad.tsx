@@ -29,11 +29,15 @@ export const SignaturePad = forwardRef<SignaturePadHandle, SignaturePadProps>(
     const last = useRef<{ x: number; y: number } | null>(null);
     const inkRef = useRef(onInkChange);
     inkRef.current = onInkChange;
+    const widthRef = useRef(0);
 
-    useEffect(() => {
+    /* (Re)init the canvas backing store. Re-running on every resize would wipe
+       the drawing, so callers only trigger it when width changed meaningfully. */
+    const setup = () => {
       const canvas = canvasRef.current;
       if (!canvas) return;
       const rect = canvas.getBoundingClientRect();
+      widthRef.current = rect.width;
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
       canvas.width = Math.max(1, Math.round(rect.width * dpr));
       canvas.height = Math.max(1, Math.round(rect.height * dpr));
@@ -46,6 +50,19 @@ export const SignaturePad = forwardRef<SignaturePadHandle, SignaturePadProps>(
       ctx.strokeStyle = STROKE;
       ctx.fillStyle = BACKGROUND;
       ctx.fillRect(0, 0, rect.width, rect.height);
+    };
+
+    useEffect(() => {
+      setup();
+      const canvas = canvasRef.current;
+      if (!canvas || typeof ResizeObserver === 'undefined') return;
+      const ro = new ResizeObserver(() => {
+        const rect = canvas.getBoundingClientRect();
+        if (Math.abs(rect.width - widthRef.current) > 8) setup();
+      });
+      ro.observe(canvas);
+      return () => ro.disconnect();
+      // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
     useImperativeHandle(

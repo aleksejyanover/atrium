@@ -8,6 +8,12 @@ import { Sidebar } from './components/Sidebar';
 import { ChatPane } from './components/ChatPane';
 import { RightPanel } from './components/RightPanel';
 import { InvitesScreen } from './components/InvitesScreen';
+import { CatalogScreen } from './components/CatalogScreen';
+import { ApplicationsScreen } from './components/ApplicationsScreen';
+import { DocumentsScreen } from './components/DocumentsScreen';
+import { ProfileScreen } from './components/ProfileScreen';
+import { WalletScreen } from './components/WalletScreen';
+import { AdminScreen } from './components/AdminScreen';
 import { Toasts } from './components/Toasts';
 import { HashIcon, MenuIcon } from './components/icons';
 import { Login } from './pages/Login';
@@ -44,7 +50,16 @@ function NoOrgPlaceholder({ onOpenNav }: { onOpenNav: () => void }) {
 }
 
 function Shell() {
-  const { booted, bootError, view, selectedChannelId, panelOpen, detail, toasts } = useApp();
+  const {
+    booted,
+    bootError,
+    view,
+    selectedChannelId,
+    panelOpen,
+    detail,
+    toasts,
+    user,
+  } = useApp();
   const [navOpen, setNavOpen] = useState(false);
 
   if (bootError) {
@@ -58,20 +73,41 @@ function Shell() {
   const closeNav = () => setNavOpen(false);
   const showPanel = panelOpen && detail !== null;
 
+  const renderMain = () => {
+    switch (view) {
+      case 'invites':
+        return <InvitesScreen onOpenNav={openNav} />;
+      case 'catalog':
+        return <CatalogScreen onOpenNav={openNav} />;
+      case 'applications':
+        return <ApplicationsScreen onOpenNav={openNav} />;
+      case 'documents':
+        return <DocumentsScreen onOpenNav={openNav} />;
+      case 'profile':
+        return <ProfileScreen onOpenNav={openNav} />;
+      case 'wallet':
+        return <WalletScreen onOpenNav={openNav} />;
+      case 'admin':
+        return user?.isAdmin ? (
+          <AdminScreen onOpenNav={openNav} />
+        ) : (
+          <NoOrgPlaceholder onOpenNav={openNav} />
+        );
+      default:
+        return selectedChannelId ? (
+          <ChatPane key={selectedChannelId} channelId={selectedChannelId} onOpenNav={openNav} />
+        ) : (
+          <NoOrgPlaceholder onOpenNav={openNav} />
+        );
+    }
+  };
+
   return (
     <CallProvider>
       <div className={showPanel ? 'app with-panel' : 'app'}>
         <Sidebar open={navOpen} onNavigate={closeNav} />
 
-        <div className="app-main">
-          {view === 'invites' ? (
-            <InvitesScreen />
-          ) : selectedChannelId ? (
-            <ChatPane key={selectedChannelId} channelId={selectedChannelId} onOpenNav={openNav} />
-          ) : (
-            <NoOrgPlaceholder onOpenNav={openNav} />
-          )}
-        </div>
+        <div className="app-main">{renderMain()}</div>
 
         {showPanel && <RightPanel />}
         {navOpen && <div className="scrim" onClick={closeNav} />}

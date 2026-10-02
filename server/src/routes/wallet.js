@@ -69,6 +69,7 @@ const nameOf = (id) => (id ? findUserById(id)?.display_name || 'Пользова
 // ---------- personal wallet (SPEC v4 §24) ----------
 
 // GET /api/wallet -> {balance, demo:true, payments:[...]} — 30 latest operations
+// SPEC v5 §29: card owner balance is unlimited → null (∞ on the client)
 router.get('/wallet', requireAuth, (req, res, next) => {
   try {
     const rows = all(
@@ -80,7 +81,7 @@ router.get('/wallet', requireAuth, (req, res, next) => {
     )
     const user = findUserById(req.userId)
     res.json({
-      balance: user.balance ?? 0,
+      balance: user.is_owner ? null : (user.balance ?? 0),
       demo: true,
       payments: rows.map((r) => walletPaymentDto(r, req.userId)),
     })
@@ -114,7 +115,8 @@ router.post('/wallet/topup', requireAuth, (req, res, next) => {
       )
       const row = get('SELECT * FROM payments WHERE id = ?', id)
       const user = findUserById(req.userId)
-      return { payment: row, balance: user.balance ?? 0 }
+      // SPEC v5 §29: owner balance is always reported as null (∞)
+      return { payment: row, balance: user.is_owner ? null : (user.balance ?? 0) }
     })
 
     logAudit({
@@ -147,8 +149,11 @@ router.post('/wallet/transfer', requireAuth, (req, res, next) => {
 
     const result = transaction(() => {
       const sender = findUserById(req.userId)
-      if ((sender.balance ?? 0) < amount) throw conflict('Недостаточно средств')
-      run('UPDATE users SET balance = balance - ? WHERE id = ?', amount, req.userId)
+      // SPEC v5 §29: card owner has unlimited funds — the check and the debit are skipped,
+      // the payment row is still recorded with its amount.
+      const infinite = !!sender.is_owner
+      if (!infinite && (sender.balance ?? 0) < amount) throw conflict('Недостаточно средств')
+      if (!infinite) run('UPDATE users SET balance = balance - ? WHERE id = ?', amount, req.userId)
       run('UPDATE users SET balance = balance + ? WHERE id = ?', amount, toUserId)
       const id = newId('p')
       run(
@@ -164,7 +169,7 @@ router.post('/wallet/transfer', requireAuth, (req, res, next) => {
       )
       const row = get('SELECT * FROM payments WHERE id = ?', id)
       const after = findUserById(req.userId)
-      return { payment: row, balance: after.balance ?? 0 }
+      return { payment: row, balance: infinite ? null : (after.balance ?? 0) }
     })
 
     const senderUser = findUserById(req.userId)
@@ -177,7 +182,8 @@ router.post('/wallet/transfer', requireAuth, (req, res, next) => {
       botSubject: toUserId,
     })
     emitToUser(toUserId, 'wallet:updated', {
-      balance: (recipient.balance ?? 0) + amount,
+      // SPEC v5 §29: card owner balance is always reported as null (∞)
+      balance: recipient.is_owner ? null : (recipient.balance ?? 0) + amount,
       reason: 'transfer',
       from: publicUser(senderUser),
       amount,
@@ -243,8 +249,10 @@ router.post('/orgs/:id/treasury/deposit', requireAuth, requireOrgMember, require
 
     const result = transaction(() => {
       const user = findUserById(req.userId)
-      if ((user.balance ?? 0) < amount) throw conflict('Недостаточно средств')
-      run('UPDATE users SET balance = balance - ? WHERE id = ?', amount, req.userId)
+      // SPEC v5 §29: owner deposits from an unlimited balance — no check, no debit
+      const infinite = !!user.is_owner
+      if (!infinite && (user.balance ?? 0) < amount) throw conflict('Недостаточно средств')
+      if (!infinite) run('UPDATE users SET balance = balance - ? WHERE id = ?', amount, req.userId)
       run('UPDATE orgs SET balance = balance + ? WHERE id = ?', amount, req.org.id)
       const id = newId('p')
       run(
@@ -259,7 +267,10 @@ router.post('/orgs/:id/treasury/deposit', requireAuth, requireOrgMember, require
       )
       const org = findOrg(req.org.id)
       const after = findUserById(req.userId)
-      return { orgBalance: org.balance ?? 0, userBalance: after.balance ?? 0 }
+      return {
+        orgBalance: org.balance ?? 0,
+        userBalance: infinite ? null : (after.balance ?? 0),
+      }
     })
 
     logAudit({
@@ -318,7 +329,8 @@ router.post('/orgs/:id/payroll', requireAuth, requireOrgMember, requireRank(60, 
       return {
         payment: row,
         orgBalance: orgAfter.balance ?? 0,
-        targetBalance: targetAfter.balance ?? 0,
+        // SPEC v5 §29: card owner balance is reported as null (∞)
+        targetBalance: targetAfter.is_owner ? null : (targetAfter.balance ?? 0),
       }
     })
 

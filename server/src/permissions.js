@@ -17,16 +17,24 @@ export const canTerminate = (actorRank) => actorRank >= 60
 export const canReviewApplications = (actorRank) => actorRank >= 40
 
 /** Change role of target: owner → any target except owner;
- *  otherwise actor.rank > target.rank AND newRole.rank < actor.rank. */
-export function canChangeRole(actorRole, targetRole, newRole) {
+ *  otherwise actor.rank > target.rank AND newRole.rank < actor.rank.
+ *  SPEC v5 §29: `targetIsOwner` (card owner, is_owner) may be assigned the
+ *  `owner` role — the «role owner is not assignable» rule applies only to
+ *  regular users; the rank ceiling is not applied to that specific case. */
+export function canChangeRole(actorRole, targetRole, newRole, targetIsOwner = false) {
+  const assigningOwner = newRole === 'owner'
   if (actorRole === 'owner') {
-    if (targetRole === 'owner') throw forbidden('Нельзя изменить роль владельца')
+    if (targetRole === 'owner' && !(targetIsOwner && assigningOwner)) {
+      throw forbidden('Нельзя изменить роль владельца')
+    }
     return true
   }
   const a = rankOf(actorRole)
   const t = rankOf(targetRole)
-  const n = rankOf(newRole)
   if (a <= t) throw forbidden('Недостаточно прав для изменения роли этого участника')
+  // §29: card owner can be made an owner regardless of the «newRole < actor.rank» rule
+  if (targetIsOwner && assigningOwner) return true
+  const n = rankOf(newRole)
   if (n >= a) throw forbidden('Нельзя назначить роль выше или равную вашей')
   return true
 }

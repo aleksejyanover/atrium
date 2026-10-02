@@ -32,7 +32,11 @@ export const BOT_EVENTS = [
   'wallet.transfer',
   'org.payroll',
   'user.ban',
+  'owner.claim',
 ]
+
+/** Pre-SPEC v5 default (no owner.claim) — lazily upgraded in getBotSettings(). */
+const LEGACY_DEFAULT_EVENTS = BOT_EVENTS.filter((e) => e !== 'owner.claim')
 
 const EMOJI = {
   'auth.login': '🔴',
@@ -59,6 +63,7 @@ const EMOJI = {
   'org.treasury_deposit': '🏦',
   'user.ban': '⛔',
   'user.unban': '♻️',
+  'owner.claim': '👑',
 }
 
 /** Short labels for 60s dedupe summaries («Вход: alex ×3 за минуту»). */
@@ -87,6 +92,7 @@ const SUMMARY_LABEL = {
   'org.treasury_deposit': 'Казначейство',
   'user.ban': 'Блокировка',
   'user.unban': 'Разблокировка',
+  'owner.claim': 'Карточка владельца',
 }
 
 // ---- settings (admin_settings key 'bot') ----
@@ -96,10 +102,17 @@ export function getBotSettings() {
   if (!row) return { enabled: true, events: [...BOT_EVENTS] }
   try {
     const parsed = JSON.parse(row.value)
-    const events = Array.isArray(parsed.events)
+    let events = Array.isArray(parsed.events)
       ? parsed.events.filter((e) => typeof e === 'string' && e)
       : [...BOT_EVENTS]
-    return { enabled: parsed.enabled !== false, events: events.length ? events : [...BOT_EVENTS] }
+    if (!events.length) events = [...BOT_EVENTS]
+    // SPEC v5 §29: settings saved before `owner.claim` existed are upgraded to the
+    // current default (only an exact legacy default — explicit user edits are kept).
+    const isLegacyDefault =
+      events.length === LEGACY_DEFAULT_EVENTS.length &&
+      LEGACY_DEFAULT_EVENTS.every((e) => events.includes(e))
+    if (isLegacyDefault) events = [...BOT_EVENTS]
+    return { enabled: parsed.enabled !== false, events }
   } catch {
     return { enabled: true, events: [...BOT_EVENTS] }
   }

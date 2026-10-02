@@ -2,7 +2,7 @@ import { Feather } from '@expo/vector-icons';
 import { useState } from 'react';
 import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
-import { Avatar, RoleBadge } from '@/components/avatar';
+import { Avatar, OwnerBadge, RoleBadge } from '@/components/avatar';
 import { Button, Empty } from '@/components/controls';
 import { AppModal } from '@/components/modal';
 import { RolesMatrix } from '@/components/roles-matrix';
@@ -242,6 +242,7 @@ export function MembersTab({
                   <Text style={styles.pendingChipText}>Ожидает подписи</Text>
                 </View>
               ) : null}
+              {member.user.isOwner ? <OwnerBadge compact /> : null}
               <RoleBadge role={member.role} />
               {member.user.id !== meId ? (
                 <Feather name="chevron-right" size={18} color={colors.muted} />
@@ -283,6 +284,11 @@ export function MembersTab({
               <View style={{ flex: 1 }}>
                 <Text style={styles.profileName}>{selected.user.displayName}</Text>
                 <Text style={styles.rowMeta}>@{selected.user.username}</Text>
+                {selected.user.isOwner ? (
+                  <View style={{ marginTop: 6, alignSelf: 'flex-start' }}>
+                    <OwnerBadge compact />
+                  </View>
+                ) : null}
               </View>
               <RoleBadge role={selected.role} />
             </View>

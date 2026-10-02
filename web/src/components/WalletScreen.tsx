@@ -1,0 +1,512 @@
+/** «Кошелёк»: баланс, пополнение счёта, переводы и история операций (SPEC v4 §24, v5 §30). */
+
+import { useCallback, useEffect, useState } from 'react';
+import { api, ApiError } from '../api';
+import { useApp } from '../store';
+import {
+  balanceText,
+  formatRub,
+  paymentKindLabel,
+  type User,
+  type WalletPayment,
+} from '../types';
+import { Avatar } from './Avatar';
+import { Modal } from './Modal';
+import { OwnerBadge } from './OwnerBadge';
+import {
+  ArrowDownLeftIcon,
+  ArrowRightIcon,
+  ArrowUpRightIcon,
+  CreditCardIcon,
+  MenuIcon,
+  SearchIcon,
+  WalletIcon,
+  XIcon,
+} from './icons';
+
+interface ScreenProps {
+  onOpenNav: () => void;
+}
+
+const timeFmt = new Intl.DateTimeFormat('ru-RU', {
+  day: 'numeric',
+  month: 'short',
+  hour: '2-digit',
+  minute: '2-digit',
+});
+
+/** «•••• 4242» → «Карта •••• 4242» (нейтральная банковская подпись, SPEC v5 §30). */
+function cardMaskLabel(mask: string): string {
+  const trimmed = mask.trim();
+  return /^Карта/i.test(trimmed) ? trimmed : `Карта ${trimmed}`;
+}
+
+/** «4242 4242 4242 4242» → groups of 4 digits, max 16 digits. */
+function maskCardInput(value: string): string {
+  const digits = value.replace(/\D/g, '').slice(0, 16);
+  return digits.replace(/(\d{4})(?=\d)/g, '$1 ').trim();
+}
+
+function toAmount(value: string): number | null {
+  const digits = value.replace(/\D/g, '');
+  if (!digits) return null;
+  const n = Number(digits);
+  return Number.isSafeInteger(n) ? n : null;
+}
+
+/* ============================================================
+   Пополнение счёта
+   ============================================================ */
+
+const TOPUP_CHIPS = [500, 1000, 5000];
+
+export function TopupModal({
+  onClose,
+  onDone,
+}: {
+  onClose: () => void;
+  onDone: (balance: number | null) => void;
+}) {
+  const { toast } = useApp();
+  const [amount, setAmount] = useState('');
+  const [card, setCard] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const value = toAmount(amount);
+  const cardDigits = card.replace(/\D/g, '');
+
+  const submit = async () => {
+    if (value === null || value < 100 || value > 500000) {
+      setError('Сумма пополнения: от 100 до 500 000 ₽');
+      return;
+    }
+    if (cardDigits.length !== 16) {
+      setError('Номер карты: 16 цифр');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await api.walletTopup(value, cardDigits);
+      toast(`Операция выполнена: +${formatRub(value)}`, 'success');
+      onDone(res.balance);
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Не удалось пополнить счёт');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal
+      title="Пополнить счёт"
+      subtitle="Деньги зачисляются мгновенно"
+      onClose={() => !busy && onClose()}
+      footer={
+        <>
+          <button className="btn btn-ghost" disabled={busy} onClick={onClose}>
+            Отмена
+          </button>
+          <button className="btn btn-primary" disabled={busy} onClick={() => void submit()}>
+            {busy ? 'Пополнение…' : 'Пополнить'}
+          </button>
+        </>
+      }
+    >
+      {error && <div className="form-error">{error}</div>}
+
+      <div className="field">
+        <label>Сумма пополнения, ₽</label>
+        <input
+          className="input"
+          inputMode="numeric"
+          value={amount}
+          placeholder="1000"
+          onChange={(e) => setAmount(e.target.value.replace(/\D/g, '').slice(0, 6))}
+          autoFocus
+        />
+        <div className="chips">
+          {TOPUP_CHIPS.map((c) => (
+            <button
+              key={c}
+              className={value === c ? 'chip active' : 'chip'}
+              onClick={() => setAmount(String(c))}
+            >
+              {formatRub(c)}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="field">
+        <label>Номер карты</label>
+        <input
+          className="input card-input"
+          inputMode="numeric"
+          autoComplete="cc-number"
+          value={card}
+          placeholder="0000 0000 0000 0000"
+          onChange={(e) => setCard(maskCardInput(e.target.value))}
+        />
+        <span className="hint">Привяжите карту для быстрых пополнений счёта</span>
+      </div>
+    </Modal>
+  );
+}
+
+/* ============================================================
+   Перевод пользователю
+   ============================================================ */
+
+export function TransferModal({
+  onClose,
+  onDone,
+}: {
+  onClose: () => void;
+  onDone: (balance: number | null) => void;
+}) {
+  const { toast, user } = useApp();
+  const [q, setQ] = useState('');
+  const [results, setResults] = useState<User[]>([]);
+  const [picked, setPicked] = useState<User | null>(null);
+  const [amount, setAmount] = useState('');
+  const [note, setNote] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  /* debounce-поиск пользователей (GET /api/users/search) */
+  useEffect(() => {
+    if (picked) return;
+    const query = q.trim();
+    if (query.length < 1) {
+      setResults([]);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      void api
+        .searchUsers(query)
+        .then((users) => setResults(users.filter((u) => u.id !== user?.id)))
+        .catch(() => setResults([]));
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [q, picked, user]);
+
+  const value = toAmount(amount);
+  const isOwner = user?.isOwner === true;
+  // SPEC v5 §29/§30: `balance === null` у карточки владельца → показываем «∞»
+  const rawBalance = user?.balance ?? null;
+  const balance = rawBalance ?? 0;
+  const unlimited = isOwner || rawBalance === null;
+  const rest = unlimited ? null : value !== null ? balance - value : balance;
+
+  const submit = async () => {
+    if (!picked) {
+      setError('Выберите получателя');
+      return;
+    }
+    if (value === null || value < 1 || value > 500000) {
+      setError('Сумма перевода: от 1 до 500 000 ₽');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await api.walletTransfer(picked.id, value, note.trim() || undefined);
+      toast(`Перевод: ${formatRub(value)} → ${picked.displayName}`, 'success');
+      onDone(res.balance);
+      onClose();
+    } catch (e) {
+      // 409 → «Недостаточно средств» (SPEC v4 §24)
+      if (e instanceof ApiError && e.status === 409) setError('Недостаточно средств');
+      else setError(e instanceof Error ? e.message : 'Не удалось выполнить перевод');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal
+      title="Перевести"
+      subtitle="Перевод между счетами Atrium"
+      onClose={() => !busy && onClose()}
+      footer={
+        <>
+          <button className="btn btn-ghost" disabled={busy} onClick={onClose}>
+            Отмена
+          </button>
+          <button
+            className="btn btn-primary"
+            disabled={!picked || busy}
+            onClick={() => void submit()}
+          >
+            {busy ? 'Отправка…' : 'Перевести'}
+          </button>
+        </>
+      }
+    >
+      {error && <div className="form-error">{error}</div>}
+
+      <div className="field">
+        <label>Получатель</label>
+        <div className="input-with-icon">
+          <SearchIcon size={15} />
+          <input
+            className="input"
+            value={picked ? `@${picked.username}` : q}
+            disabled={picked !== null}
+            placeholder="Имя или username…"
+            onChange={(e) => {
+              setQ(e.target.value);
+              setPicked(null);
+            }}
+          />
+          {picked && (
+            <button
+              className="icon-btn input-clear"
+              title="Сменить получателя"
+              onClick={() => {
+                setPicked(null);
+                setQ('');
+              }}
+            >
+              <XIcon size={14} />
+            </button>
+          )}
+        </div>
+        {!picked && results.length > 0 && (
+          <div className="search-results">
+            {results.map((u) => (
+              <button key={u.id} className="search-result" onClick={() => setPicked(u)}>
+                <Avatar name={u.displayName} color={u.avatarColor} size={26} />
+                <span style={{ flex: 1, minWidth: 0, textAlign: 'left' }}>
+                  {u.displayName} <span className="muted">@{u.username}</span>
+                </span>
+                {u.isOwner && <OwnerBadge />}
+              </button>
+            ))}
+          </div>
+        )}
+        {picked?.isOwner && (
+          <div className="owner-hint">Этот пользователь — карточка владельца</div>
+        )}
+        {!picked && q.trim().length > 0 && results.length === 0 && (
+          <div className="hint">Ничего не найдено</div>
+        )}
+      </div>
+
+      <div className="field">
+        <label>Сумма, ₽</label>
+        <input
+          className="input"
+          inputMode="numeric"
+          value={amount}
+          placeholder="500"
+          onChange={(e) => setAmount(e.target.value.replace(/\D/g, '').slice(0, 6))}
+        />
+        <span className="hint">Доступно: {balanceText(rawBalance, isOwner)}</span>
+      </div>
+
+      <div className="field">
+        <label>Комментарий (необязательно)</label>
+        <input
+          className="input"
+          value={note}
+          maxLength={300}
+          placeholder="За что / за что именно"
+          onChange={(e) => setNote(e.target.value)}
+        />
+      </div>
+
+      {picked && value !== null && value > 0 && (
+        <div className="summary-box">
+          <div className="info-kv">
+            <span className="k">Получатель</span>
+            <span className="v" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+              {picked.displayName}
+              {picked.isOwner && <OwnerBadge />}
+            </span>
+          </div>
+          <div className="info-kv">
+            <span className="k">Сумма</span>
+            <span className="v">{formatRub(value)}</span>
+          </div>
+          <div className="info-kv">
+            <span className="k">Комментарий</span>
+            <span className="v">{note.trim() ? note.trim() : '—'}</span>
+          </div>
+          <div className="info-kv">
+            <span className="k">Баланс после перевода</span>
+            <span className="v">{rest === null ? '∞' : formatRub(Math.max(0, rest))}</span>
+          </div>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+/* ============================================================
+   Строка истории операций
+   ============================================================ */
+
+function counterpartyLabel(p: WalletPayment): string | null {
+  const cp = p.counterparty;
+  if (!cp) return null;
+  if ('user' in cp) return cp.user.displayName;
+  return `«${cp.org.name}»`;
+}
+
+function kindIcon(p: WalletPayment) {
+  if (p.kind === 'topup') return <CreditCardIcon size={16} />;
+  if (p.kind === 'transfer') return <ArrowRightIcon size={16} />;
+  if (p.kind === 'salary') return <ArrowDownLeftIcon size={16} />;
+  return <ArrowUpRightIcon size={16} />;
+}
+
+function PayRow({ payment }: { payment: WalletPayment }) {
+  const kindLabel = paymentKindLabel(payment.kind);
+  const cp = counterpartyLabel(payment);
+  const title = cp ?? kindLabel;
+  const showKind = title !== kindLabel;
+  const isIn = payment.direction === 'in';
+  return (
+    <div className="pay-row">
+      <span className={isIn ? 'pay-icon in' : 'pay-icon out'} aria-hidden>
+        {kindIcon(payment)}
+      </span>
+      <div className="pay-main">
+        <div className="pay-title">{title}</div>
+        <div className="pay-sub">
+          {showKind ? `${kindLabel} · ` : ''}
+          {timeFmt.format(payment.createdAt)}
+          {payment.note ? ` · ${payment.note}` : ''}
+        </div>
+        {payment.cardMask && (
+          <div className="pay-badges">
+            <span className="pay-mask">{cardMaskLabel(payment.cardMask)}</span>
+          </div>
+        )}
+      </div>
+      <div className="pay-right">
+        <span className={isIn ? 'pay-amount in' : 'pay-amount out'}>
+          {isIn ? '+' : '−'}
+          {formatRub(payment.amount)}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   Экран «Кошелёк»
+   ============================================================ */
+
+export function WalletScreen({ onOpenNav }: ScreenProps) {
+  const { user, socket, updateUser, toast } = useApp();
+  const [balance, setBalance] = useState<number | null>(user?.balance ?? null);
+  const [payments, setPayments] = useState<WalletPayment[] | null>(null);
+  const [showTopup, setShowTopup] = useState(false);
+  const [showTransfer, setShowTransfer] = useState(false);
+
+  // SPEC v5 §29/§30: владелец (или balance === null после загрузки) → «∞»
+  const unlimited = user?.isOwner === true || (balance === null && payments !== null);
+  const balanceDisplay = unlimited ? '∞' : balance === null ? '…' : formatRub(balance);
+
+  const applyBalance = useCallback(
+    (next: number | null) => {
+      setBalance(next);
+      if (user) updateUser({ ...user, balance: next });
+    },
+    [user, updateUser],
+  );
+
+  const load = useCallback(async () => {
+    try {
+      const data = await api.wallet();
+      setBalance(data.balance);
+      setPayments(data.payments);
+      if (user) updateUser({ ...user, balance: data.balance });
+    } catch (e) {
+      setPayments([]);
+      toast(e instanceof Error ? e.message : 'Не удалось загрузить кошелёк', 'error');
+    }
+  }, [user, updateUser, toast]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  /* живое обновление: зарплата/перевод пришли, пока открыт кошелёк */
+  useEffect(() => {
+    if (!socket) return;
+    const onWallet = () => {
+      void load();
+    };
+    socket.on('wallet:updated', onWallet);
+    return () => {
+      socket.off('wallet:updated', onWallet);
+    };
+  }, [socket, load]);
+
+  return (
+    <div className="screen">
+      <div className="screen-head">
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0 }}>
+          <button className="icon-btn only-mobile" onClick={onOpenNav} title="Меню">
+            <MenuIcon />
+          </button>
+          <div style={{ minWidth: 0 }}>
+            <div className="screen-title">Кошелёк</div>
+            <div className="screen-sub">Баланс, переводы и история операций</div>
+          </div>
+        </div>
+      </div>
+
+      <div className="list-column">
+        <div className="wallet-card">
+          <div className="wallet-label">Ваш баланс</div>
+          <div className={unlimited ? 'wallet-balance inf' : 'wallet-balance'}>
+            {balanceDisplay}
+          </div>
+          <div className="wallet-actions">
+            <button className="btn btn-primary" onClick={() => setShowTopup(true)}>
+              <ArrowDownLeftIcon size={15} /> Пополнить
+            </button>
+            <button className="btn btn-ghost" onClick={() => setShowTransfer(true)}>
+              <ArrowRightIcon size={15} /> Перевести
+            </button>
+          </div>
+        </div>
+
+        <p className="panel-section-title" style={{ marginTop: 20 }}>
+          История операций
+        </p>
+
+        {payments === null ? (
+          <div className="empty-state">Загрузка…</div>
+        ) : payments.length === 0 ? (
+          <div className="empty-state">
+            <WalletIcon size={26} />
+            <div style={{ marginTop: 8 }}>Операций пока нет — пополните счёт</div>
+          </div>
+        ) : (
+          payments.map((p) => <PayRow key={p.id} payment={p} />)
+        )}
+      </div>
+
+      {showTopup && (
+        <TopupModal
+          onClose={() => setShowTopup(false)}
+          onDone={(b) => applyBalance(b)}
+        />
+      )}
+      {showTransfer && (
+        <TransferModal
+          onClose={() => setShowTransfer(false)}
+          onDone={(b) => applyBalance(b)}
+        />
+      )}
+    </div>
+  );
+}

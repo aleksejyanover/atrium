@@ -16,8 +16,8 @@ import {
 
 function statusText(status: ConnStatus): string {
   if (status === 'connected') return 'В сети';
-  if (status === 'lost') return 'Соединение потеряно';
-  return 'Соединение…';
+  if (status === 'lost') return 'Соединение нестабильно';
+  return 'Установка соединения…';
 }
 
 function statusDotClass(status: ConnStatus): string {
@@ -32,6 +32,10 @@ function kindLabel(kind: 'video' | 'audio'): string {
 
 function endedText(reason: EndReason): string {
   if (reason === 'reject') return 'Вызов отклонён';
+  if (reason === 'noanswer') return 'Собеседник не отвечает';
+  if (reason === 'failed') {
+    return 'Не удалось установить соединение. Проверьте интернет у собеседника';
+  }
   return 'Звонок завершён';
 }
 
@@ -88,15 +92,23 @@ function OutgoingCard() {
 }
 
 function EndedCard() {
-  const { call, endReason } = useCall();
+  const { call, endReason, dismissEnded } = useCall();
   if (!call || endReason === null) return null;
+  const failed = endReason === 'failed';
   return (
     <div className="call-card">
       <div className="call-avatar">
         <AvatarBlock call={call} size={84} />
       </div>
       <div className="who">{call.peer.name}</div>
-      <div className="sub">{endedText(endReason)}</div>
+      <div className={failed ? 'sub error' : 'sub'}>{endedText(endReason)}</div>
+      {failed && (
+        <div className="call-actions">
+          <button className="call-btn decline" onClick={dismissEnded}>
+            <PhoneOffIcon size={16} /> Завершить
+          </button>
+        </div>
+      )}
     </div>
   );
 }

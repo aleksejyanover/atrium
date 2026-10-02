@@ -26,7 +26,9 @@ export interface User {
   /** Создатель приложения (SPEC v4 §25, вычисляется сервером, только в /api/me). */
   isAdmin?: boolean;
   /** Баланс кошелька, целые рубли (SPEC v4 §25, только в /api/me). */
-  balance?: number;
+  balance?: number | null;
+  /** Владелец платформы: бесконечный баланс, всегда owner в организациях (SPEC v5 §29). */
+  isOwner?: boolean;
 }
 
 export interface Org {
@@ -242,7 +244,9 @@ export interface WalletPayment {
 
 /** GET /api/wallet */
 export interface WalletInfo {
-  balance: number;
+  /** У владельца сервер возвращает null — клиент рисует «∞» (SPEC v5 §29). */
+  balance: number | null;
+  /** Поле остаётся в API, но в UI не отображается (SPEC v5 §30). */
   demo: boolean;
   payments: WalletPayment[];
 }

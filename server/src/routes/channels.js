@@ -33,15 +33,7 @@ router.use(['/dms', '/channels', '/messages'], requireAuth)
 
 function userSafe(id) {
   const row = findUserById(id)
-  if (!row) return null
-  return {
-    id: row.id,
-    username: row.username,
-    displayName: row.display_name,
-    email: row.email,
-    avatarColor: row.avatar_color,
-    createdAt: row.created_at,
-  }
+  return row ? publicUser(row) : null
 }
 
 // ---------- DMs ----------
@@ -154,8 +146,8 @@ router.get('/channels/:id/messages', (req, res, next) => {
         id: row.id,
         channelId: row.channel_id,
         sender: s
-          ? { id: s.id, username: s.username, displayName: s.display_name, avatarColor: s.avatar_color }
-          : { id: row.sender_id, username: '', displayName: '', avatarColor: '#8B8B94' },
+          ? { id: s.id, username: s.username, displayName: s.display_name, avatarColor: s.avatar_color, isOwner: !!s.is_owner }
+          : { id: row.sender_id, username: '', displayName: '', avatarColor: '#8B8B94', isOwner: false },
         text: row.text,
         createdAt: row.created_at,
       }

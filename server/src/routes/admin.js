@@ -4,7 +4,7 @@ import { requireAuth, requireAdmin } from '../auth.js'
 import { auditDto, logAudit } from '../audit.js'
 import { getBotSettings, setBotSettings, BOT_EVENTS } from '../bot.js'
 import { onlineCount, disconnectUserSockets } from '../sockets.js'
-import { publicUser, bad, notFound, str } from '../util.js'
+import { publicUser, bad, conflict, notFound, str } from '../util.js'
 
 const router = Router()
 // SPEC v4 §23: every /api/admin/* route requires auth + superadmin, else 403 «Доступ запрещён»
@@ -146,6 +146,8 @@ router.post('/admin/users/:id/ban', (req, res, next) => {
     const target = findUserById(req.params.id)
     if (!target) throw notFound('Пользователь не найден')
     if (target.id === req.userId) throw bad('Нельзя заблокировать собственный аккаунт')
+    // SPEC v5 §29: card owners are protected from bans
+    if (target.is_owner) throw conflict('Владельца нельзя заблокировать')
 
     run('UPDATE users SET banned = 1 WHERE id = ?', target.id)
     const dropped = disconnectUserSockets(target.id) // active sockets off immediately

@@ -72,6 +72,28 @@ export function formatCardNumber(digits: string): string {
   return only.replace(/(\d{4})(?=\d)/g, '$1 ');
 }
 
+/** Баланс: у владельца — «∞» (isOwner / balance === null), иначе «12 500 ₽» (SPEC v5 §29–30). */
+export function formatBalance(value: number | null | undefined, isOwner?: boolean): string {
+  if (isOwner || value === null) return '∞';
+  return rub(value ?? 0);
+}
+
+/** Детерминированный серийный номер карточки владельца: OWNER-XXXX от id (SPEC v5 §30). */
+export function ownerSerial(userId: string): string {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let hash = 2166136261 >>> 0;
+  for (let i = 0; i < userId.length; i++) {
+    hash ^= userId.charCodeAt(i);
+    hash = Math.imul(hash, 16777619) >>> 0;
+  }
+  let out = '';
+  for (let i = 0; i < 4; i++) {
+    hash = (Math.imul(hash, 1664525) + 1013904223) >>> 0;
+    out += alphabet[hash % alphabet.length];
+  }
+  return `OWNER-${out}`;
+}
+
 /** «5 участников», «21 участник», «11 участников» */
 export function pluralizeMembers(count: number): string {
   const mod10 = count % 10;

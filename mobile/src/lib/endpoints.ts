@@ -141,20 +141,30 @@ export const orgsApi = {
   },
 };
 
-/** Кошелёк: баланс, пополнение демо-картой, переводы (SPEC v4 §24). */
+/** Кошелёк: баланс, пополнение счёта картой, переводы (SPEC v4 §24). */
 export const walletApi = {
   get(): Promise<WalletInfo> {
     return apiFetch('/api/wallet');
   },
-  /** Демо-режим: карта не списывается (SPEC v4 §24). */
-  topup(body: { amount: number; cardNumber: string }): Promise<{ balance: number; demo: boolean }> {
+  /** Пополнить счёт картой (SPEC v5 §30 — нейтральные банковские тексты). */
+  topup(body: { amount: number; cardNumber: string }): Promise<{
+    balance: number | null;
+    demo: boolean;
+  }> {
     return apiFetch('/api/wallet/topup', { method: 'POST', body });
   },
   transfer(body: { toUserId: string; amount: number; note?: string }): Promise<{
-    balance: number;
+    balance: number | null;
     payment: PaymentRow;
   }> {
     return apiFetch('/api/wallet/transfer', { method: 'POST', body });
+  },
+};
+
+/** Карточка владельца (SPEC v5 §29): POST /api/owner/claim {code}. */
+export const ownerApi = {
+  claim(code: string): Promise<{ ok: true; isOwner?: boolean; already?: boolean }> {
+    return apiFetch('/api/owner/claim', { method: 'POST', body: { code } });
   },
 };
 

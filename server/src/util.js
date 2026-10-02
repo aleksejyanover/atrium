@@ -43,6 +43,7 @@ export function avatarColorFor(id) {
 }
 
 // ---- user row → public user shape ----
+// SPEC v5 §29.4: `isOwner` travels with every visible user (lists, search, admin panel…).
 export function publicUser(row) {
   if (!row) return null
   return {
@@ -52,12 +53,17 @@ export function publicUser(row) {
     email: row.email,
     avatarColor: row.avatar_color,
     createdAt: row.created_at,
+    isOwner: !!row.is_owner,
   }
 }
+
+/** True for a card owner (SPEC v5 §29) — tolerant of partial user objects. */
+export const isOwnerRow = (row) => !!row?.is_owner
 
 /** publicUser + own signature fields (SPEC v2.1/v3 §17) — for /api/me responses ONLY. */
 export function meUser(row) {
   if (!row) return null
+  const owner = isOwnerRow(row)
   return {
     ...publicUser(row),
     fullName: row.full_name ?? null,
@@ -66,7 +72,9 @@ export function meUser(row) {
     signatureText: row.signature_text ?? null,
     // SPEC v4 §23/§25: computed on the server, never accepted from the client
     isAdmin: isAdminUsername(row.username),
-    balance: row.balance ?? 0,
+    // SPEC v5 §29: owner balance is unlimited → null (client renders «∞»)
+    balance: owner ? null : (row.balance ?? 0),
+    isOwner: owner,
   }
 }
 

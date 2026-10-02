@@ -18,8 +18,6 @@ interface Props {
   meta?: string | null;
   note?: string | null;
   createdAt: number;
-  /** Бейдж «Демо» — для пополнений (SPEC v4 §24). */
-  demo?: boolean;
 }
 
 const KIND_ICONS: Record<PaymentKind, IconName> = {
@@ -29,8 +27,8 @@ const KIND_ICONS: Record<PaymentKind, IconName> = {
   treasury_deposit: 'upload',
 };
 
-/** Строка истории операций кошелька / казначейства (SPEC v4 §24). */
-export function PaymentRow({ kind, amount, incoming, title, meta, note, createdAt, demo }: Props) {
+/** Строка истории операций кошелька / казначейства (SPEC v4 §24, тексты v5 §30). */
+export function PaymentRow({ kind, amount, incoming, title, meta, note, createdAt }: Props) {
   const icon: IconName =
     kind === 'transfer' ? (incoming ? 'arrow-down-left' : 'arrow-up-right') : KIND_ICONS[kind];
   const tint = incoming ? colors.ok : colors.danger;
@@ -59,11 +57,6 @@ export function PaymentRow({ kind, amount, incoming, title, meta, note, createdA
           <Text style={styles.time}>
             {formatDate(createdAt)} · {formatTime(createdAt)}
           </Text>
-          {demo ? (
-            <View style={styles.demoBadge}>
-              <Text style={styles.demoText}>Демо</Text>
-            </View>
-          ) : null}
         </View>
       </View>
 
@@ -120,19 +113,6 @@ const styles = StyleSheet.create({
     color: colors.muted,
     fontSize: 11,
     opacity: 0.85,
-  },
-  demoBadge: {
-    backgroundColor: 'rgba(124,108,246,0.14)',
-    borderColor: 'rgba(124,108,246,0.5)',
-    borderWidth: 1,
-    borderRadius: radius.sm,
-    paddingHorizontal: 6,
-    paddingVertical: 1,
-  },
-  demoText: {
-    color: colors.accent,
-    fontSize: 10,
-    fontWeight: '700',
   },
   amount: {
     fontSize: 14,

@@ -47,14 +47,7 @@ router.use('/orgs', requireAuth)
 
 function memberDto(row) {
   return {
-    user: publicUser({
-      id: row.id,
-      username: row.username,
-      email: row.email,
-      display_name: row.display_name,
-      avatar_color: row.avatar_color,
-      created_at: row.created_at,
-    }),
+    user: publicUser(row),
     role: row.m_role,
     joinedAt: row.m_joined_at,
   }
@@ -236,7 +229,10 @@ router.patch('/orgs/:id/members/:userId', requireOrgMember, (req, res, next) => 
     if (target.user_id === req.userId && newRole !== req.member.role) {
       // still allow per matrix (owner may transfer), but validate normally below
     }
-    canChangeRole(req.member.role, target.role, newRole)
+    // SPEC v5 §29: card owners (is_owner) may be given the `owner` role —
+    // the «role owner is not assignable» rule covers plain users only.
+    const targetUser = findUserById(target.user_id)
+    canChangeRole(req.member.role, target.role, newRole, !!targetUser?.is_owner)
 
     run('UPDATE members SET role = ? WHERE org_id = ? AND user_id = ?', newRole, req.org.id, target.user_id)
     emitToOrg(req.org.id, 'role:changed', { orgId: req.org.id, userId: target.user_id, role: newRole })
@@ -349,16 +345,21 @@ router.post('/orgs/:id/invite', requireOrgMember, (req, res, next) => {
     if (!usernameOrEmail) throw bad('Укажите имя пользователя или email')
     if (!isValidRole(role)) throw bad('Недопустимая роль')
 
-    // role must be rank < actor.rank (owner exception: any except owner)
-    if (req.member.role === 'owner') {
-      if (role === 'owner') throw bad('Нельзя пригласить роль владельца')
-    } else {
-      if (rankOf(role) >= req.rank) throw bad('Можно приглашать только с ролью ниже вашей')
-    }
-
     const target =
       findUserByUsername(usernameOrEmail) ||
       (usernameOrEmail.includes('@') ? get('SELECT * FROM users WHERE email = ?', usernameOrEmail.toLowerCase()) : null)
+
+    // role must be rank < actor.rank (owner exception: any except owner).
+    // SPEC v5 §29: none of these limits apply to a card owner (is_owner) —
+    // they are forced into the `owner` role on join anyway.
+    if (!target?.is_owner) {
+      if (req.member.role === 'owner') {
+        if (role === 'owner') throw bad('Нельзя пригласить роль владельца')
+      } else {
+        if (rankOf(role) >= req.rank) throw bad('Можно приглашать только с ролью ниже вашей')
+      }
+    }
+
     if (!target) throw notFound('Пользователь не найден')
 
     if (findMember(req.org.id, target.id)) throw conflict('Этот пользователь уже является участником организации')

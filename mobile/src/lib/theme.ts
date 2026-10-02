@@ -12,6 +12,8 @@ export const colors = {
   accent2: '#6C5CE7',
   danger: '#F0506E',
   ok: '#3ECF8E',
+  /** Золотой акцент карточки владельца (SPEC v5 §30) — только для владельца. */
+  gold: '#F5BE41',
 } as const;
 
 export const radius = {

@@ -3,13 +3,12 @@ import { useFocusEffect } from 'expo-router';
 import { useCallback, useState } from 'react';
 import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
-import { Avatar } from '@/components/avatar';
+import { Avatar, OwnerBadge } from '@/components/avatar';
 import { Button, Empty, Field } from '@/components/controls';
 import { AppModal } from '@/components/modal';
-import { DemoBanner } from '@/components/wallet/demo-banner';
 import { PaymentRow } from '@/components/wallet/payment-row';
 import { orgsApi } from '@/lib/endpoints';
-import { rub } from '@/lib/format';
+import { formatBalance, rub } from '@/lib/format';
 import { colors, radius } from '@/lib/theme';
 import { Member, OrgFinance, OrgFinanceTx } from '@/lib/types';
 import { useAuth } from '@/state/auth';
@@ -109,7 +108,9 @@ export function FinanceTab({ orgId, members, meId }: Props) {
       Alert.alert('Пополнить казначейство', 'Укажите сумму');
       return;
     }
-    if (value > (user?.balance ?? 0)) {
+    // Владелец: баланс неограничен (balance === null) — проверка пропускается (SPEC v5 §29).
+    const myBalance = user?.balance ?? null;
+    if (!user?.isOwner && myBalance !== null && value > myBalance) {
       Alert.alert('Пополнить казначейство', 'Недостаточно средств на личном балансе');
       return;
     }
@@ -203,7 +204,7 @@ export function FinanceTab({ orgId, members, meId }: Props) {
             <Text style={styles.treasuryLabel}>Казначейство организации</Text>
             <Text style={styles.treasuryValue}>{rub(finance.balance)}</Text>
             <Text style={styles.treasuryHint}>
-              Ваш личный баланс: {rub(user?.balance ?? 0)} · демо-режим
+              Ваш личный баланс: {formatBalance(user?.balance, user?.isOwner)}
             </Text>
             <View style={styles.rowButtons}>
               <Button
@@ -221,8 +222,6 @@ export function FinanceTab({ orgId, members, meId }: Props) {
               />
             </View>
           </View>
-
-          <DemoBanner />
 
           {/* ---- выплачено ---- */}
           <Text style={styles.sectionTitle}>Выплачено</Text>
@@ -269,10 +268,8 @@ export function FinanceTab({ orgId, members, meId }: Props) {
           <View style={styles.treasuryCard}>
             <Text style={styles.treasuryLabel}>Мои начисления</Text>
             <Text style={styles.treasuryValue}>{rub(myTotal)}</Text>
-            <Text style={styles.treasuryHint}>Начисления от этой организации · демо-режим</Text>
+            <Text style={styles.treasuryHint}>Начисления от этой организации</Text>
           </View>
-
-          <DemoBanner />
 
           <Text style={styles.sectionTitle}>История начислений</Text>
           {finance.transactions.length === 0 ? (
@@ -312,7 +309,6 @@ export function FinanceTab({ orgId, members, meId }: Props) {
             onPress={() => void submitDeposit()}
           />
         }>
-        <DemoBanner />
         <Field
           label="Сумма, ₽"
           value={depositAmount}
@@ -322,7 +318,7 @@ export function FinanceTab({ orgId, members, meId }: Props) {
           maxLength={9}
         />
         <Text style={styles.modalHint}>
-          Списание с вашего личного баланса: {rub(user?.balance ?? 0)}
+          Списание с вашего личного баланса: {formatBalance(user?.balance, user?.isOwner)}
         </Text>
         <Text style={styles.modalHint}>В казначействе: {rub(finance.balance)}</Text>
       </AppModal>
@@ -343,8 +339,6 @@ export function FinanceTab({ orgId, members, meId }: Props) {
             onPress={() => void submitPayroll()}
           />
         }>
-        <DemoBanner />
-
         <Text style={styles.modalLabel}>Сотрудник</Text>
         {members.map((member) => {
           const active = member.user.id === payrollUserId;
@@ -367,6 +361,7 @@ export function FinanceTab({ orgId, members, meId }: Props) {
                   @{member.user.username}
                 </Text>
               </View>
+              {member.user.isOwner ? <OwnerBadge compact /> : null}
               {active ? <Feather name="check" size={16} color={colors.accent} /> : null}
             </Pressable>
           );

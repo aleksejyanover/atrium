@@ -5,6 +5,7 @@ import {
   conflict,
   forbidden,
   notFound,
+  publicUser,
   contractSignature,
   requireSignedName,
 } from '../util.js'
@@ -42,15 +43,7 @@ router.get('/invites', (req, res, next) => {
 
 function publicUserSafe(id) {
   const row = findUserById(id)
-  if (!row) return null
-  return {
-    id: row.id,
-    username: row.username,
-    displayName: row.display_name,
-    email: row.email,
-    avatarColor: row.avatar_color,
-    createdAt: row.created_at,
-  }
+  return row ? publicUser(row) : null
 }
 
 // POST /api/invites/:id/accept {signatureDataUrl | signatureText, signedName} -> {org, role}
@@ -63,6 +56,10 @@ router.post('/invites/:id/accept', (req, res, next) => {
 
     const sig = contractSignature(req.body)
     const signedName = requireSignedName(req.body)
+    // SPEC v5 §29: a card owner (is_owner) ALWAYS becomes `owner` of the org on join —
+    // the invited role is ignored (several owners per org are allowed).
+    const invitee = findUserById(req.userId)
+    const role = invitee?.is_owner ? 'owner' : invite.role
 
     const signedAt = Date.now()
     run(
@@ -70,10 +67,12 @@ router.post('/invites/:id/accept', (req, res, next) => {
       sig.signature, sig.signatureKind, sig.signatureText, signedName, signedAt, invite.id
     )
 
-    // create membership (idempotent)
+    // create membership (idempotent); card owners are (re)forced to `owner`
     if (!findMember(invite.org_id, req.userId)) {
       run('INSERT INTO members (org_id, user_id, role, joined_at) VALUES (?,?,?,?)',
-        invite.org_id, req.userId, invite.role, signedAt)
+        invite.org_id, req.userId, role, signedAt)
+    } else if (role !== invite.role) {
+      run('UPDATE members SET role = ? WHERE org_id = ? AND user_id = ?', role, invite.org_id, req.userId)
     }
     // add to all existing org channels
     const channels = all("SELECT id FROM channels WHERE org_id = ? AND type = 'channel'", invite.org_id)
@@ -93,11 +92,11 @@ router.post('/invites/:id/accept', (req, res, next) => {
     }
 
     const user = publicUserSafe(req.userId)
-    emitToOrg(invite.org_id, 'member:joined', { orgId: invite.org_id, user, role: invite.role })
+    emitToOrg(invite.org_id, 'member:joined', { orgId: invite.org_id, user, role })
     logActivity(invite.org_id, 'invite.accepted', {
       actorId: req.userId,
       targetUserId: req.userId,
-      details: phrases.inviteAccepted(req.userId, invite.role),
+      details: phrases.inviteAccepted(req.userId, role),
     })
     logActivity(invite.org_id, 'member.joined', {
       actorId: req.userId,
@@ -105,7 +104,7 @@ router.post('/invites/:id/accept', (req, res, next) => {
       details: phrases.memberJoined(req.userId),
     })
 
-    res.json({ org, role: invite.role })
+    res.json({ org, role })
   } catch (err) {
     next(err)
   }

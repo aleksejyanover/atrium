@@ -3,23 +3,22 @@ import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { Button, Field } from '@/components/controls';
 import { AppModal } from '@/components/modal';
-import { DemoBanner } from '@/components/wallet/demo-banner';
 import { walletApi } from '@/lib/endpoints';
-import { formatCardNumber, rub } from '@/lib/format';
+import { formatBalance, formatCardNumber, rub } from '@/lib/format';
 import { colors, radius } from '@/lib/theme';
 
 const QUICK_AMOUNTS = [500, 1000, 5000];
 
 interface Props {
   visible: boolean;
-  /** Текущий баланс — подсказка под суммой. */
-  balance: number;
+  /** Текущий баланс — подсказка под суммой (null — баланс не ограничен, SPEC v5 §29). */
+  balance: number | null;
   onClose(): void;
   /** Успешное пополнение: родитель перечитывает кошелёк и показывает тост. */
   onDone(amount: number): void;
 }
 
-/** Модалка пополнения кошелька демо-картой (SPEC v4 §24). */
+/** Модалка пополнения счёта картой (SPEC v5 §30 — нейтральные банковские тексты). */
 export function TopupModal({ visible, balance, onClose, onDone }: Props) {
   const [amount, setAmount] = useState('');
   const [card, setCard] = useState('');
@@ -62,17 +61,15 @@ export function TopupModal({ visible, balance, onClose, onDone }: Props) {
   return (
     <AppModal
       visible={visible}
-      title="Пополнить кошелёк"
+      title="Пополнить счёт"
       onClose={close}
       footer={
         <Button
-          title={valid ? `Пополнить на ${rub(amountValue)}` : 'Пополнить'}
+          title={valid ? `Пополнить на ${rub(amountValue)}` : 'Пополнить счёт'}
           loading={busy}
           onPress={() => void submit()}
         />
       }>
-      <DemoBanner />
-
       <Field
         label="Сумма пополнения, ₽"
         value={amount}
@@ -106,10 +103,10 @@ export function TopupModal({ visible, balance, onClose, onDone }: Props) {
         placeholder="0000 0000 0000 0000"
         keyboardType="number-pad"
         maxLength={19}
-        hint="Демо-режим: данные карты никуда не отправляются"
+        hint="16 цифр с лицевой стороны карты"
       />
 
-      <Text style={styles.balanceHint}>Текущий баланс: {rub(balance)}</Text>
+      <Text style={styles.balanceHint}>Текущий баланс: {formatBalance(balance)}</Text>
     </AppModal>
   );
 }

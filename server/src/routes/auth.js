@@ -184,10 +184,36 @@ router.post('/auth/logout', requireAuth, (req, res, next) => {
   }
 })
 
-// GET /api/me -> {user} (SPEC v3 §17: + fullName, signature…; SPEC v4 §25: + isAdmin, balance)
+// GET /api/me -> {user} (SPEC v3 §17: + fullName, signature…; SPEC v4 §25: + isAdmin, balance;
+// SPEC v5 §29: + isOwner, balance = null for the card owner meaning ∞)
 router.get('/me', requireAuth, (req, res) => {
   const user = meUser(findUserById(req.userId))
-  res.json({ user, isAdmin: user.isAdmin, balance: user.balance })
+  res.json({ user, isAdmin: user.isAdmin, isOwner: user.isOwner, balance: user.balance })
+})
+
+// POST /api/owner/claim {code} -> {ok:true, isOwner:true} | {ok:true, already:true} (SPEC v5 §29)
+// Code: process.env.ATRIUM_OWNER_CODE || 'OWNER-ATRIUM-777' (trimmed, case-insensitive).
+router.post('/owner/claim', requireAuth, (req, res, next) => {
+  try {
+    const code = str(req.body?.code) ?? ''
+    const expected = (process.env.ATRIUM_OWNER_CODE || 'OWNER-ATRIUM-777').trim()
+    if (!code || code.toLowerCase() !== expected.toLowerCase()) throw bad('Неверный код')
+
+    const row = findUserById(req.userId)
+    if (row.is_owner) return res.json({ ok: true, already: true, isOwner: true })
+
+    run('UPDATE users SET is_owner = 1 WHERE id = ?', row.id)
+    logAudit({
+      actorId: row.id,
+      action: 'owner.claim',
+      details: `Карточка владельца активирована: ${row.username}`,
+      botText: `👑 Карточка владельца активирована: ${row.display_name || row.username}`,
+      botSubject: row.username,
+    })
+    res.json({ ok: true, isOwner: true })
+  } catch (err) {
+    next(err)
+  }
 })
 
 // ---- profile update (SPEC v2.1 §17 PUT, SPEC v3 §17 PATCH) ----

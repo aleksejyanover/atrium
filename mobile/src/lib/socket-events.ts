@@ -91,7 +91,7 @@ export interface ServerToClientEvents {
   'activity:new': (payload: { activity: ActivityEntry }) => void;
   /** Баланс кошелька изменился — только владельцу счёта (SPEC v4 §24). */
   'wallet:updated': (payload: {
-    balance: number;
+    balance: number | null;
     reason?: 'topup' | 'transfer' | 'salary' | 'treasury_deposit';
     from?: User;
     amount?: number;

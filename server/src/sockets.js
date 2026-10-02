@@ -274,6 +274,7 @@ export function initSockets(io) {
             username: user.username,
             displayName: user.display_name,
             avatarColor: user.avatar_color,
+            isOwner: !!user.is_owner, // SPEC v5 §29
           },
           text,
           createdAt,
@@ -320,6 +321,7 @@ export function initSockets(io) {
               username: user.username,
               displayName: user.display_name,
               avatarColor: user.avatar_color,
+              isOwner: !!user.is_owner, // SPEC v5 §29
             },
             typing,
           })

@@ -198,3 +198,153 @@ export const FileTextIcon = (p: IconProps) => (
     <path d="M14 2v6h6M16 13H8M16 17H8M10 9H8" />
   </svg>
 );
+
+export const GlobeIcon = (p: IconProps) => (
+  <svg {...base(p)}>
+    <circle cx="12" cy="12" r="10" />
+    <path d="M2 12h20" />
+    <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+  </svg>
+);
+
+export const ClipboardIcon = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />
+    <rect x="8" y="2" width="8" height="4" rx="1" />
+    <path d="M9 13h6M9 17h4" />
+  </svg>
+);
+
+export const HistoryIcon = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="M3 12a9 9 0 1 0 3-6.7" />
+    <path d="M3 4v5h5" />
+    <path d="M12 7v5l3 2" />
+  </svg>
+);
+
+export const ShieldIcon = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+    <path d="m9 12 2 2 4-4" />
+  </svg>
+);
+
+export const PenIcon = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="M12 20h9" />
+    <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4z" />
+  </svg>
+);
+
+export const UserIcon = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+    <circle cx="12" cy="7" r="4" />
+  </svg>
+);
+
+export const KeyIcon = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4" />
+  </svg>
+);
+
+export const CheckCheckIcon = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="M18 6 7 17l-5-5" />
+    <path d="m22 10-7.5 7.5L13 16" />
+  </svg>
+);
+
+export const WalletIcon = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="M21 12V7H5a2 2 0 0 1 0-4h14v4" />
+    <path d="M3 5v14a2 2 0 0 0 2 2h16v-5" />
+    <path d="M18 12a2 2 0 0 0 0 4h4v-4z" />
+  </svg>
+);
+
+export const ArrowDownLeftIcon = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="M17 7 7 17" />
+    <path d="M17 17H7V7" />
+  </svg>
+);
+
+export const ArrowUpRightIcon = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="M7 17 17 7" />
+    <path d="M7 7h10v10" />
+  </svg>
+);
+
+export const ArrowRightIcon = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="M5 12h14" />
+    <path d="m13 6 6 6-6 6" />
+  </svg>
+);
+
+export const CreditCardIcon = (p: IconProps) => (
+  <svg {...base(p)}>
+    <rect x="2" y="5" width="20" height="14" rx="2.5" />
+    <path d="M2 10h20" />
+    <path d="M6 15h4" />
+  </svg>
+);
+
+export const BotIcon = (p: IconProps) => (
+  <svg {...base(p)}>
+    <rect x="4" y="8" width="16" height="12" rx="3" />
+    <path d="M12 4v4" />
+    <path d="M16 8V6a4 4 0 0 0-8 0v2" />
+    <path d="M9 13v1M15 13v1" />
+  </svg>
+);
+
+export const SearchIcon = (p: IconProps) => (
+  <svg {...base(p)}>
+    <circle cx="11" cy="11" r="7" />
+    <path d="m20 20-3.6-3.6" />
+  </svg>
+);
+
+export const BanIcon = (p: IconProps) => (
+  <svg {...base(p)}>
+    <circle cx="12" cy="12" r="9" />
+    <path d="m5.7 5.7 12.6 12.6" />
+  </svg>
+);
+
+export const LogInIcon = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4" />
+    <path d="m10 17 5-5-5-5" />
+    <path d="M15 12H3" />
+  </svg>
+);
+
+export const DashboardIcon = (p: IconProps) => (
+  <svg {...base(p)}>
+    <rect x="3" y="3" width="7" height="8" rx="1.5" />
+    <rect x="14" y="3" width="7" height="5" rx="1.5" />
+    <rect x="14" y="11" width="7" height="10" rx="1.5" />
+    <rect x="3" y="14" width="7" height="7" rx="1.5" />
+  </svg>
+);
+
+export const RefreshIcon = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+    <path d="M21 3v6h-6" />
+  </svg>
+);
+
+/** Корона — заголовок раздела «Карточка владельца» (SPEC v5 §29/§30). */
+export const CrownIcon = (p: IconProps) => (
+  <svg {...base(p)}>
+    <path d="M3 7l4.5 4L12 4.5 16.5 11 21 7l-2 11H5L3 7z" />
+    <path d="M5 18h14" />
+  </svg>
+);

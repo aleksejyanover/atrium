@@ -90,3 +90,23 @@ export function RoleBadge({ role, compact }: { role: Role; compact?: boolean }) 
 export function RoleRank({ role }: { role: Role }) {
   return <Text style={{ color: colors.muted, fontSize: 11 }}>{ROLE_RANK[role]}</Text>;
 }
+
+/**
+ * Золотая пилюля «Владелец» — поле isOwner пользователя (SPEC v5 §29–30):
+ * фон rgba(245,190,65,.15), текст #F5BE41.
+ */
+export function OwnerBadge({ compact }: { compact?: boolean }) {
+  return (
+    <View
+      style={{
+        backgroundColor: 'rgba(245,190,65,0.15)',
+        borderColor: 'rgba(245,190,65,0.45)',
+        borderWidth: 1,
+        borderRadius: radius.sm,
+        paddingHorizontal: compact ? 6 : 8,
+        paddingVertical: 2,
+      }}>
+      <Text style={{ color: colors.gold, fontSize: 11, fontWeight: '700' }}>Владелец</Text>
+    </View>
+  );
+}

@@ -3,13 +3,14 @@ import { useFocusEffect, useRouter } from 'expo-router';
 import { useCallback, useState } from 'react';
 import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
-import { Avatar } from '@/components/avatar';
+import { Avatar, OwnerBadge } from '@/components/avatar';
 import { Button, Empty, Field } from '@/components/controls';
+import { OwnerCard } from '@/components/owner-card';
 import { SignaturePad } from '@/components/signature-pad';
 import { SignaturePreview } from '@/components/signature-preview';
 import { AuthGuard, ScreenHeader } from '@/components/screen';
-import { meApi } from '@/lib/endpoints';
-import { rub } from '@/lib/format';
+import { meApi, ownerApi } from '@/lib/endpoints';
+import { formatBalance } from '@/lib/format';
 import {
   Stroke,
   strokesToSignatureDataUrl,
@@ -48,6 +49,9 @@ function ProfileScreen() {
   const [strokes, setStrokes] = useState<Stroke[]>([]);
   const [padSize, setPadSize] = useState({ w: 0, h: 0 });
   const [savingSignature, setSavingSignature] = useState(false);
+
+  const [ownerCode, setOwnerCode] = useState('');
+  const [claiming, setClaiming] = useState(false);
 
   useFocusEffect(
     useCallback(() => {
@@ -97,6 +101,26 @@ function ProfileScreen() {
       Alert.alert('Смена пароля', e instanceof Error ? e.message : 'Ошибка');
     } finally {
       setSavingPassword(false);
+    }
+  };
+
+  /** Активация карточки владельца — POST /api/owner/claim (SPEC v5 §29). */
+  const claimOwner = async () => {
+    const code = ownerCode.trim();
+    if (!code) {
+      Alert.alert('Карточка владельца', 'Введите код владельца');
+      return;
+    }
+    setClaiming(true);
+    try {
+      await ownerApi.claim(code);
+      setOwnerCode('');
+      show('👑 Карточка владельца активирована');
+      await refreshMe();
+    } catch (e) {
+      Alert.alert('Карточка владельца', e instanceof Error ? e.message : 'Неверный код');
+    } finally {
+      setClaiming(false);
     }
   };
 
@@ -190,9 +214,12 @@ function ProfileScreen() {
           <View style={styles.avatarRow}>
             <Avatar name={user.displayName} color={user.avatarColor} size={64} />
             <View style={{ flex: 1 }}>
-              <Text style={styles.name} numberOfLines={1}>
-                {user.displayName}
-              </Text>
+              <View style={styles.nameRow}>
+                <Text style={styles.name} numberOfLines={1}>
+                  {user.displayName}
+                </Text>
+                {user.isOwner ? <OwnerBadge compact /> : null}
+              </View>
               <Text style={styles.meta} numberOfLines={1}>
                 @{user.username}
               </Text>
@@ -249,13 +276,53 @@ function ProfileScreen() {
             onPress={() => router.push('/wallet')}
             style={({ pressed }) => [styles.walletRow, pressed && { opacity: 0.8 }]}>
             <View style={{ flex: 1 }}>
-              <Text style={styles.walletBalance}>{rub(user.balance ?? 0)}</Text>
-              <Text style={styles.hint}>
-                Демо-режим: карта не списывается, реальные деньги не участвуют
+              <Text style={[styles.walletBalance, user.isOwner && styles.walletBalanceOwner]}>
+                {formatBalance(user.balance, user.isOwner)}
               </Text>
+              <Text style={styles.hint}>Пополнение счёта, переводы и история операций</Text>
             </View>
             <Feather name="chevron-right" size={18} color={colors.muted} />
           </Pressable>
+        </View>
+
+        {/* ---- карточка владельца ---- */}
+        <View style={styles.card}>
+          <View style={styles.cardTitleRow}>
+            <Feather name="award" size={16} color={colors.gold} />
+            <Text style={styles.cardTitle}>Карточка владельца</Text>
+          </View>
+
+          {user.isOwner ? (
+            <>
+              <OwnerCard
+                displayName={user.displayName}
+                username={user.username}
+                userId={user.id}
+              />
+              <Text style={styles.hint}>
+                Вас всегда делают владельцем организации при вступлении
+              </Text>
+            </>
+          ) : (
+            <>
+              <Field
+                label="Код владельца"
+                value={ownerCode}
+                onChangeText={setOwnerCode}
+                placeholder="Введите код"
+                autoCapitalize="none"
+                autoCorrect={false}
+                maxLength={64}
+                hint="Введите код, чтобы получить карточку владельца"
+              />
+              <Button
+                title="Активировать"
+                icon="key"
+                loading={claiming}
+                onPress={() => void claimOwner()}
+              />
+            </>
+          )}
         </View>
 
         {/* ---- пароль ---- */}
@@ -437,10 +504,16 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 14,
   },
+  nameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
   name: {
     color: colors.text,
     fontSize: 18,
     fontWeight: '700',
+    flexShrink: 1,
   },
   meta: {
     color: colors.muted,
@@ -510,6 +583,9 @@ const styles = StyleSheet.create({
     fontSize: 22,
     fontWeight: '700',
     marginBottom: 3,
+  },
+  walletBalanceOwner: {
+    color: colors.gold,
   },
   rowButtons: {
     flexDirection: 'row',

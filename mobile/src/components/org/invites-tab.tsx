@@ -2,7 +2,7 @@ import { Feather } from '@expo/vector-icons';
 import { useEffect, useState } from 'react';
 import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
-import { Avatar, RoleBadge } from '@/components/avatar';
+import { Avatar, OwnerBadge, RoleBadge } from '@/components/avatar';
 import { Button, Empty, Field } from '@/components/controls';
 import { AppModal } from '@/components/modal';
 import { invitesApi, orgsApi, usersApi } from '@/lib/endpoints';
@@ -243,6 +243,7 @@ export function InvitesTab({
                 </Text>
                 <Text style={styles.cardMeta}>@{user.username}</Text>
               </View>
+              {user.isOwner ? <OwnerBadge compact /> : null}
               {active ? <Feather name="check" size={16} color={colors.accent} /> : null}
             </Pressable>
           );

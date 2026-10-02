@@ -6,8 +6,9 @@ import { useApp } from '../store';
 import { roleLabel, unwrapUser, type IncomingInvite } from '../types';
 import { Avatar } from './Avatar';
 import { ConfirmModal, Modal } from './Modal';
+import { SavedSignaturePanel } from './Signature';
 import { SignaturePad, type SignaturePadHandle } from './SignaturePad';
-import { ArrowLeftIcon, FileTextIcon, MailIcon } from './icons';
+import { ArrowLeftIcon, FileTextIcon, MailIcon, MenuIcon } from './icons';
 
 const dateFmt = new Intl.DateTimeFormat('ru-RU', {
   day: 'numeric',
@@ -18,10 +19,11 @@ const dateFmt = new Intl.DateTimeFormat('ru-RU', {
 /* ---------------- detail: contract + signature ---------------- */
 
 function InviteDetail({ invite, onBack }: { invite: IncomingInvite; onBack: () => void }) {
-  const { refreshOrgs, refreshInvites, selectOrg, setView, toast } = useApp();
+  const { user, refreshOrgs, refreshInvites, selectOrg, setView, toast } = useApp();
   const inviter = unwrapUser(invite.inviter);
 
-  const [name, setName] = useState('');
+  const [name, setName] = useState(user?.fullName || user?.displayName || '');
+  const [used, setUsed] = useState(false);
   const [hasInk, setHasInk] = useState(false);
   const [signature, setSignature] = useState<string | null>(null);
   const [showConfirm, setShowConfirm] = useState(false);
@@ -29,10 +31,19 @@ function InviteDetail({ invite, onBack }: { invite: IncomingInvite; onBack: () =
   const padRef = useRef<SignaturePadHandle>(null);
 
   const nameOk = name.trim().length >= 2;
-  const canSubmit = nameOk && hasInk && !busy;
+  const canSubmit = nameOk && (used || hasInk) && !busy;
+
+  const useMine = () => {
+    if (used) {
+      setUsed(false);
+      return;
+    }
+    setUsed(true);
+    setName(user?.fullName || user?.displayName || '');
+  };
 
   const openConfirm = () => {
-    const dataUrl = padRef.current?.toDataURL();
+    const dataUrl = used ? user?.signature ?? null : padRef.current?.toDataURL();
     if (!dataUrl || !nameOk) return;
     setSignature(dataUrl);
     setShowConfirm(true);
@@ -42,7 +53,10 @@ function InviteDetail({ invite, onBack }: { invite: IncomingInvite; onBack: () =
     if (!signature) return;
     setBusy(true);
     try {
-      const { org } = await api.acceptInvite(invite.invite.id, signature, name.trim());
+      const { org } = await api.acceptInvite(invite.invite.id, {
+        signatureDataUrl: signature,
+        signedName: name.trim(),
+      });
       await Promise.all([refreshOrgs(), refreshInvites()]);
       selectOrg(org.id);
       setView('chat');
@@ -116,7 +130,17 @@ function InviteDetail({ invite, onBack }: { invite: IncomingInvite; onBack: () =
           Подпись
         </div>
         <div className="sign-card" style={{ marginTop: 0 }}>
-          <div className="sign-row">
+          <SavedSignaturePanel
+            profile={user}
+            used={used}
+            onUse={useMine}
+            onOpenProfile={() => {
+              onBack();
+              setView('profile');
+            }}
+          />
+
+          <div className="sign-row" style={{ marginTop: 14 }}>
             <div className="field">
               <label>ФИО</label>
               <input
@@ -131,20 +155,26 @@ function InviteDetail({ invite, onBack }: { invite: IncomingInvite; onBack: () =
               )}
             </div>
 
-            <div className="sig-pad-wrap">
-              <div className="sig-head">
-                <span className="sig-label">Распишитесь здесь</span>
-                <button
-                  className="btn btn-ghost btn-sm"
-                  disabled={!hasInk}
-                  onClick={() => padRef.current?.clear()}
-                >
-                  Очистить
-                </button>
+            {!used && (
+              <div className="sig-pad-wrap">
+                <div className="sig-head">
+                  <span className="sig-label">Распишитесь здесь</span>
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    disabled={!hasInk}
+                    onClick={() => padRef.current?.clear()}
+                  >
+                    Очистить
+                  </button>
+                </div>
+                <SignaturePad ref={padRef} onInkChange={setHasInk} />
+                {!hasInk && (
+                  <div className="hint" style={{ marginTop: 5 }}>
+                    Подпись не поставлена
+                  </div>
+                )}
               </div>
-              <SignaturePad ref={padRef} onInkChange={setHasInk} />
-              {!hasInk && <div className="hint" style={{ marginTop: 5 }}>Подпись не поставлена</div>}
-            </div>
+            )}
           </div>
 
           <div className="sign-actions">
@@ -192,7 +222,7 @@ function InviteDetail({ invite, onBack }: { invite: IncomingInvite; onBack: () =
 
 /* ---------------- list ---------------- */
 
-export function InvitesScreen() {
+export function InvitesScreen({ onOpenNav }: { onOpenNav: () => void }) {
   const { invites, refreshInvites, toast } = useApp();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [declineTarget, setDeclineTarget] = useState<IncomingInvite | null>(null);
@@ -224,10 +254,15 @@ export function InvitesScreen() {
   return (
     <div className="screen">
       <div className="screen-head">
-        <div>
-          <div className="screen-title">Входящие приглашения</div>
-          <div className="screen-sub">
-            Подпишите договор, чтобы вступить в организацию
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0 }}>
+          <button className="icon-btn only-mobile" onClick={onOpenNav} title="Меню">
+            <MenuIcon />
+          </button>
+          <div style={{ minWidth: 0 }}>
+            <div className="screen-title">Входящие приглашения</div>
+            <div className="screen-sub">
+              Подпишите договор, чтобы вступить в организацию
+            </div>
           </div>
         </div>
       </div>

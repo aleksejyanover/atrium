@@ -6,20 +6,37 @@
  */
 
 import type {
+  ActivityEntry,
+  AdminStats,
+  AdminUserRow,
+  AuditItem,
   AuthResponse,
+  BotSettings,
   Channel,
+  DiscoverOrg,
   DMEntry,
+  Doc,
+  IncomingApplication,
   IncomingInvite,
   InviteCore,
+  LoginItem,
   Message,
   MessagesPage,
+  MyApplication,
+  MyDocument,
   Org,
   OrgDetail,
+  OrgDismissal,
+  OrgFinance,
+  OrgFinanceTx,
   OrgWithRole,
+  PaymentKind,
   PendingInvite,
+  ReadEntry,
   Role,
   User,
   UserLike,
+  WalletPayment,
 } from './types';
 import { isRecord, unwrapUser } from './types';
 
@@ -104,6 +121,9 @@ const patch = <T>(path: string, body: unknown): Promise<T> =>
 
 const del = <T>(path: string): Promise<T> => request<T>(path, { method: 'DELETE' });
 
+const put = <T>(path: string, body: unknown): Promise<T> =>
+  request<T>(path, { method: 'PUT', body: JSON.stringify(body) });
+
 /* ---------------- normalizers for ambiguous `{user}` refs ---------------- */
 
 function normalizeIncomingInvite(raw: unknown): IncomingInvite | null {
@@ -168,6 +188,169 @@ function asArray(v: unknown): unknown[] {
   return Array.isArray(v) ? v : [];
 }
 
+/**
+ * `balance` из ответов кошелька/профиля (SPEC v4 §24, v5 §29): у карточки
+ * владельца сервер отдаёт `null` — «∞», поэтому `null` сохраняем как есть.
+ */
+function normalizeBalance(raw: unknown, fallback: number = 0): number | null {
+  if (typeof raw === 'number') return raw;
+  return raw === null ? null : fallback;
+}
+
+/** `GET /api/me` user (SPEC v5 §29): `isOwner` + `balance: null` для владельца. */
+function normalizeSelfUser(raw: unknown): User {
+  const user = unwrapUser(raw);
+  if (!user) fail('Некорректный ответ сервера', 500);
+  if (!isRecord(raw) || raw.balance === undefined) return user;
+  return { ...user, balance: normalizeBalance(raw.balance) };
+}
+
+/**
+ * Normalizes a `documents` row (application / dismissal). The SPEC writes the
+ * SQL columns in snake_case but the REST contract everywhere else is camelCase —
+ * we tolerate both spellings so the UI never breaks on a naming mismatch.
+ */
+function normalizeDoc(raw: unknown): Doc | null {
+  if (!isRecord(raw)) return null;
+  const d = (isRecord(raw.application) ? raw.application : isRecord(raw.document) ? raw.document : raw) as Record<string, unknown>;
+  if (typeof d.id !== 'string') return null;
+  const pick = (camel: string, snake: string): unknown => (d[camel] !== undefined ? d[camel] : d[snake]);
+  const str = (v: unknown): string | null => (typeof v === 'string' ? v : null);
+  const num = (v: unknown): number | null => (typeof v === 'number' ? v : null);
+  const statusRaw = str(pick('status', 'status'));
+  const status = (statusRaw ?? 'pending') as Doc['status'];
+  return {
+    id: d.id,
+    orgId: str(pick('orgId', 'org_id')) ?? undefined,
+    type: (str(pick('type', 'type')) as Doc['type']) ?? undefined,
+    targetUserId: str(pick('targetUserId', 'target_user_id')) ?? undefined,
+    createdBy: str(pick('createdBy', 'created_by')) ?? undefined,
+    status,
+    message: str(pick('message', 'message')),
+    contractText: str(pick('contractText', 'contract_text')) ?? undefined,
+    signature: str(pick('signature', 'signature')),
+    signatureKind: str(pick('signatureKind', 'signature_kind')),
+    signatureText: str(pick('signatureText', 'signature_text')),
+    signedName: str(pick('signedName', 'signed_name')),
+    signedAt: num(pick('signedAt', 'signed_at')),
+    createdAt: num(pick('createdAt', 'created_at')) ?? Date.now(),
+    resolvedAt: num(pick('resolvedAt', 'resolved_at')),
+  };
+}
+
+function docOf(raw: unknown): Doc | null {
+  return normalizeDoc(raw);
+}
+
+function normalizeActivity(raw: unknown): ActivityEntry | null {
+  if (!isRecord(raw)) return null;
+  const a = isRecord(raw.activity) ? raw.activity : raw;
+  if (typeof a.id !== 'string') return null;
+  const orgId = typeof a.orgId === 'string' ? a.orgId : typeof a.org_id === 'string' ? a.org_id : undefined;
+  const createdAt =
+    typeof a.createdAt === 'number' ? a.createdAt : typeof a.created_at === 'number' ? a.created_at : Date.now();
+  return {
+    id: a.id,
+    orgId,
+    action: typeof a.action === 'string' ? a.action : '',
+    details: typeof a.details === 'string' ? a.details : '',
+    actor: unwrapUser(a.actor),
+    targetUser: unwrapUser(a.targetUser ?? a.target_user),
+    createdAt,
+  };
+}
+
+function normalizeWalletPayment(raw: unknown): WalletPayment | null {
+  if (!isRecord(raw) || typeof raw.id !== 'string') return null;
+  const kind = raw.kind;
+  if (kind !== 'topup' && kind !== 'transfer' && kind !== 'salary' && kind !== 'treasury_deposit') {
+    return null;
+  }
+  const cp = isRecord(raw.counterparty) ? raw.counterparty : null;
+  const cpUser = cp ? unwrapUser(cp.user) : null;
+  const cpOrg = cp && isRecord(cp.org) ? cp.org : null;
+  const counterparty: WalletPayment['counterparty'] = cpUser
+    ? { user: cpUser }
+    : cpOrg && typeof cpOrg.id === 'string'
+      ? { org: { id: cpOrg.id, name: typeof cpOrg.name === 'string' ? cpOrg.name : '' } }
+      : null;
+  return {
+    id: raw.id,
+    kind,
+    amount: typeof raw.amount === 'number' ? raw.amount : 0,
+    direction: raw.direction === 'out' ? 'out' : 'in',
+    counterparty,
+    note: typeof raw.note === 'string' ? raw.note : null,
+    cardMask: typeof raw.cardMask === 'string' ? raw.cardMask : null,
+    createdAt: typeof raw.createdAt === 'number' ? raw.createdAt : Date.now(),
+  };
+}
+
+/* ---------------- normalizers for v4 finance & creator panel ---------------- */
+
+const PAYMENT_KINDS: readonly string[] = ['topup', 'transfer', 'salary', 'treasury_deposit'];
+
+function isPaymentKind(v: unknown): v is PaymentKind {
+  return typeof v === 'string' && PAYMENT_KINDS.includes(v);
+}
+
+/** `GET /api/orgs/:id/finance` transaction row → `OrgFinanceTx`. */
+function normalizeFinanceTx(raw: unknown): OrgFinanceTx | null {
+  if (!isRecord(raw) || typeof raw.id !== 'string' || !isPaymentKind(raw.kind)) return null;
+  return {
+    id: raw.id,
+    orgId: typeof raw.orgId === 'string' ? raw.orgId : null,
+    kind: raw.kind,
+    amount: typeof raw.amount === 'number' ? raw.amount : 0,
+    note: typeof raw.note === 'string' ? raw.note : null,
+    cardMask: typeof raw.cardMask === 'string' ? raw.cardMask : null,
+    createdAt: typeof raw.createdAt === 'number' ? raw.createdAt : Date.now(),
+    fromUser: unwrapUser(raw.fromUser),
+    toUser: unwrapUser(raw.toUser),
+  };
+}
+
+/** audit_log row (also the payload of `admin:event`) → `AuditItem`. */
+export function normalizeAuditItem(raw: unknown): AuditItem | null {
+  if (!isRecord(raw) || typeof raw.id !== 'string') return null;
+  return {
+    id: raw.id,
+    action: typeof raw.action === 'string' ? raw.action : '',
+    details: typeof raw.details === 'string' ? raw.details : '',
+    actor: unwrapUser(raw.actor),
+    targetUser: unwrapUser(raw.targetUser),
+    orgName: typeof raw.orgName === 'string' ? raw.orgName : null,
+    ip: typeof raw.ip === 'string' ? raw.ip : null,
+    createdAt: typeof raw.createdAt === 'number' ? raw.createdAt : Date.now(),
+  };
+}
+
+/** login_log row → `LoginItem`. */
+function normalizeLoginItem(raw: unknown): LoginItem | null {
+  if (!isRecord(raw) || typeof raw.id !== 'string') return null;
+  return {
+    id: raw.id,
+    user: unwrapUser(raw.user),
+    success: raw.success === true,
+    ip: typeof raw.ip === 'string' ? raw.ip : null,
+    userAgent: typeof raw.userAgent === 'string' ? raw.userAgent : null,
+    createdAt: typeof raw.createdAt === 'number' ? raw.createdAt : Date.now(),
+  };
+}
+
+/** `GET /api/admin/users` row → `AdminUserRow`. */
+function normalizeAdminUser(raw: unknown): AdminUserRow | null {
+  const u = unwrapUser(raw);
+  if (!u || !isRecord(raw)) return null;
+  return {
+    ...u,
+    banned: raw.banned === true,
+    lastLoginAt: typeof raw.lastLoginAt === 'number' ? raw.lastLoginAt : null,
+    orgsCount: typeof raw.orgsCount === 'number' ? raw.orgsCount : 0,
+    balance: typeof raw.balance === 'number' ? raw.balance : 0,
+  };
+}
+
 /* ---------------- API ---------------- */
 
 export const api = {
@@ -186,7 +369,32 @@ export const api = {
   },
 
   me(): Promise<{ user: User }> {
-    return get<{ user: User }>('/api/me');
+    return get<{ user: unknown }>('/api/me').then((res) => ({
+      user: normalizeSelfUser(res.user),
+    }));
+  },
+
+  /** Активация карточки владельца (SPEC v5 §29): 400 → «Неверный код». */
+  ownerClaim(code: string): Promise<{ ok: true; isOwner?: boolean; already?: boolean }> {
+    return post<{ ok: true; isOwner?: boolean; already?: boolean }>('/api/owner/claim', { code });
+  },
+
+  /** Update profile / password / signature (SPEC v3 §17 — PATCH /api/me). */
+  patchMe(body: {
+    displayName?: string;
+    fullName?: string;
+    email?: string;
+    signature?: string | null;
+    signatureKind?: 'typed' | 'drawn' | null;
+    currentPassword?: string;
+    password?: string;
+  }): Promise<{ user: User }> {
+    return patch<{ user: User }>('/api/me', body);
+  },
+
+  /** Drop the saved personal signature (signature + kind → null). */
+  clearSignature(): Promise<{ user: User }> {
+    return patch<{ user: User }>('/api/me', { signature: null, signatureKind: null });
   },
 
   /* users */
@@ -203,10 +411,15 @@ export const api = {
     return asArray(res.orgs) as OrgWithRole[];
   },
 
-  createOrg(name: string, description?: string): Promise<{ org: Org; role: Role }> {
+  createOrg(
+    name: string,
+    description?: string,
+    isPublic?: boolean,
+  ): Promise<{ org: Org; role: Role }> {
     return post<{ org: Org; role: Role }>('/api/orgs', {
       name,
       ...(description ? { description } : {}),
+      ...(isPublic === undefined ? {} : { isPublic }),
     });
   },
 
@@ -214,7 +427,10 @@ export const api = {
     return get<OrgDetail>(`/api/orgs/${id}`);
   },
 
-  patchOrg(id: string, body: { name?: string; description?: string }): Promise<{ org: Org }> {
+  patchOrg(
+    id: string,
+    body: { name?: string; description?: string; isPublic?: boolean },
+  ): Promise<{ org: Org }> {
     return patch<{ org: Org }>(`/api/orgs/${id}`, body);
   },
 
@@ -245,15 +461,15 @@ export const api = {
       .filter((i): i is PendingInvite => i !== null);
   },
 
+  /**
+   * Sign the join contract. The signature is EITHER a drawn/typed image
+   * (`signatureDataUrl`) OR a text signature (`signatureText`) — SPEC v3 §17.
+   */
   acceptInvite(
     id: string,
-    signatureDataUrl: string,
-    signedName: string,
+    signature: { signatureDataUrl?: string; signatureText?: string; signedName: string },
   ): Promise<{ org: Org; role: Role }> {
-    return post<{ org: Org; role: Role }>(`/api/invites/${id}/accept`, {
-      signatureDataUrl,
-      signedName,
-    });
+    return post<{ org: Org; role: Role }>(`/api/invites/${id}/accept`, signature);
   },
 
   declineInvite(id: string): Promise<{ ok: true }> {
@@ -273,6 +489,147 @@ export const api = {
     return del<{ ok: true }>(`/api/orgs/${orgId}/members/${userId}`);
   },
 
+  /* ---------------- catalog of organizations (SPEC v2 §14.1) ---------------- */
+
+  async discover(q?: string): Promise<DiscoverOrg[]> {
+    const res = await get<{ orgs: unknown }>(
+      q ? `/api/discover?q=${encodeURIComponent(q)}` : '/api/discover',
+    );
+    return asArray(res.orgs) as DiscoverOrg[];
+  },
+
+  /* ---------------- join applications (SPEC v2 §14.3) ---------------- */
+
+  createApplication(
+    orgId: string,
+    body: {
+      message?: string;
+      signatureDataUrl?: string;
+      signatureText?: string;
+      signedName: string;
+    },
+  ): Promise<{ application: Doc }> {
+    return post<{ application: Doc }>(`/api/orgs/${orgId}/applications`, body);
+  },
+
+  async myApplications(): Promise<MyApplication[]> {
+    const res = await get<{ applications: unknown }>('/api/applications/mine');
+    return asArray(res.applications)
+      .map((raw): MyApplication | null => {
+        if (!isRecord(raw)) return null;
+        const application = docOf(raw.application ?? raw);
+        const org = isRecord(raw.org) ? raw.org : null;
+        if (!application || !org || typeof org.id !== 'string') return null;
+        return {
+          application,
+          org: {
+            id: org.id,
+            name: typeof org.name === 'string' ? org.name : '',
+            ...(typeof org.isPublic === 'boolean' ? { isPublic: org.isPublic } : {}),
+          },
+        };
+      })
+      .filter((x): x is MyApplication => x !== null);
+  },
+
+  async orgApplications(orgId: string): Promise<IncomingApplication[]> {
+    const res = await get<{ applications: unknown }>(`/api/orgs/${orgId}/applications`);
+    return asArray(res.applications)
+      .map((raw): IncomingApplication | null => {
+        if (!isRecord(raw)) return null;
+        const application = docOf(raw.application ?? raw);
+        if (!application) return null;
+        const org = isRecord(raw.org) ? raw.org : null;
+        return {
+          application,
+          org: {
+            id:
+              typeof org?.id === 'string'
+                ? org.id
+                : typeof application.orgId === 'string'
+                  ? application.orgId
+                  : orgId,
+            name: typeof org?.name === 'string' ? org.name : '',
+          },
+          user: unwrapUser(raw.user),
+        };
+      })
+      .filter((x): x is IncomingApplication => x !== null);
+  },
+
+  acceptApplication(id: string): Promise<{ application: Doc }> {
+    return post<{ application: Doc }>(`/api/applications/${id}/accept`);
+  },
+
+  rejectApplication(id: string): Promise<{ application: Doc }> {
+    return post<{ application: Doc }>(`/api/applications/${id}/reject`);
+  },
+
+  cancelApplication(id: string): Promise<{ application: Doc }> {
+    return post<{ application: Doc }>(`/api/applications/${id}/cancel`);
+  },
+
+  /* ---------------- dismissals (SPEC v2 §14.6) ---------------- */
+
+  createDismissal(
+    orgId: string,
+    body: { userId: string; reason?: string },
+  ): Promise<{ document: Doc }> {
+    return post<{ document: Doc }>(`/api/orgs/${orgId}/dismissals`, body);
+  },
+
+  async myDocuments(): Promise<MyDocument[]> {
+    const res = await get<{ documents: unknown }>('/api/documents/mine');
+    return asArray(res.documents)
+      .map((raw) => {
+        if (!isRecord(raw)) return null;
+        const document = docOf(raw.document ?? raw);
+        const org = isRecord(raw.org) ? raw.org : null;
+        if (!document || !org || typeof org.id !== 'string') return null;
+        return {
+          document,
+          org: { id: org.id, name: typeof org.name === 'string' ? org.name : '' },
+          createdBy: unwrapUser(raw.createdBy ?? raw.created_by),
+        } satisfies MyDocument;
+      })
+      .filter((x): x is MyDocument => x !== null);
+  },
+
+  async orgDismissals(orgId: string): Promise<OrgDismissal[]> {
+    const res = await get<{ documents: unknown }>(`/api/orgs/${orgId}/dismissals`);
+    return asArray(res.documents)
+      .map((raw) => {
+        if (!isRecord(raw)) return null;
+        const document = docOf(raw.document ?? raw);
+        if (!document) return null;
+        return {
+          document,
+          targetUser: unwrapUser(raw.targetUser ?? raw.target_user),
+          createdBy: unwrapUser(raw.createdBy ?? raw.created_by),
+        } satisfies OrgDismissal;
+      })
+      .filter((x): x is OrgDismissal => x !== null);
+  },
+
+  signDocument(
+    id: string,
+    body: { signatureDataUrl?: string; signatureText?: string; signedName: string },
+  ): Promise<{ document: Doc }> {
+    return post<{ document: Doc }>(`/api/documents/${id}/sign`, body);
+  },
+
+  rejectDocument(id: string): Promise<{ document: Doc }> {
+    return post<{ document: Doc }>(`/api/documents/${id}/reject`);
+  },
+
+  cancelDocument(id: string): Promise<{ document: Doc }> {
+    return post<{ document: Doc }>(`/api/documents/${id}/cancel`);
+  },
+
+  terminateDocument(id: string): Promise<{ document: Doc }> {
+    return post<{ document: Doc }>(`/api/documents/${id}/terminate`);
+  },
+
   /* channels & messages */
   async listChannels(orgId: string): Promise<Channel[]> {
     const res = await get<{ channels: unknown }>(`/api/orgs/${orgId}/channels`);
@@ -286,17 +643,19 @@ export const api = {
   async listDMs(): Promise<DMEntry[]> {
     const res = await get<{ dms: unknown }>('/api/dms');
     return asArray(res.dms)
-      .map((raw) => {
+      .map((raw): DMEntry | null => {
         if (!isRecord(raw)) return null;
         const channel = isRecord(raw.channel) ? (raw.channel as unknown as Channel) : null;
         const peer = unwrapUser(raw.peer);
-        const org = isRecord(raw.org) ? raw.org : null;
-        if (!channel || !peer || !org || typeof org.id !== 'string') return null;
-        return {
-          channel,
-          peer,
-          org: { id: org.id, name: typeof org.name === 'string' ? org.name : '' },
-        } satisfies DMEntry;
+        if (!channel || !peer) return null;
+        // `org` is null for org-less DMs (chat with the Atrium bot, SPEC v4 §23)
+        const orgRaw = isRecord(raw.org) ? raw.org : null;
+        const org =
+          orgRaw && typeof orgRaw.id === 'string'
+            ? { id: orgRaw.id, name: typeof orgRaw.name === 'string' ? orgRaw.name : '' }
+            : null;
+        const unread = typeof raw.unread === 'number' ? raw.unread : channel.unread;
+        return { channel: { ...channel, unread }, peer, org } satisfies DMEntry;
       })
       .filter((d): d is DMEntry => d !== null);
   },
@@ -318,6 +677,198 @@ export const api = {
 
   deleteMessage(id: string): Promise<{ ok: true }> {
     return del<{ ok: true }>(`/api/messages/${id}`);
+  },
+
+  /* ---------------- read receipts (SPEC v3 §18) ---------------- */
+
+  markRead(channelId: string, at?: number): Promise<{ ok: true }> {
+    return post<{ ok: true }>(`/api/channels/${channelId}/read`, at ? { at } : {});
+  },
+
+  async readStatus(channelId: string): Promise<ReadEntry[]> {
+    const res = await get<{ reads: unknown }>(`/api/channels/${channelId}/read-status`);
+    return asArray(res.reads)
+      .map((raw) => {
+        if (!isRecord(raw)) return null;
+        const userId =
+          typeof raw.userId === 'string' ? raw.userId : typeof raw.user_id === 'string' ? raw.user_id : null;
+        const lastReadAt =
+          typeof raw.lastReadAt === 'number'
+            ? raw.lastReadAt
+            : typeof raw.last_read_at === 'number'
+              ? raw.last_read_at
+              : null;
+        if (!userId || lastReadAt === null) return null;
+        return { userId, lastReadAt } satisfies ReadEntry;
+      })
+      .filter((x): x is ReadEntry => x !== null);
+  },
+
+  /* ---------------- activity log (SPEC v3 §18) ---------------- */
+
+  async activity(
+    orgId: string,
+    before?: string,
+    limit = 50,
+  ): Promise<{ activity: ActivityEntry[]; hasMore: boolean }> {
+    const params = new URLSearchParams();
+    if (before) params.set('before', before);
+    params.set('limit', String(limit));
+    const res = await get<{ activity: unknown; hasMore?: boolean }>(
+      `/api/orgs/${orgId}/activity?${params.toString()}`,
+    );
+    return {
+      activity: asArray(res.activity)
+        .map(normalizeActivity)
+        .filter((a): a is ActivityEntry => a !== null),
+      hasMore: res.hasMore === true,
+    };
+  },
+
+  /* ---------------- wallet (SPEC v4 §24) ---------------- */
+
+  async wallet(): Promise<{ balance: number | null; demo: boolean; payments: WalletPayment[] }> {
+    const res = await get<{ balance: unknown; demo?: unknown; payments: unknown }>('/api/wallet');
+    return {
+      // SPEC v5 §29: у владельца `balance: null` → клиент рисует «∞»; `demo` никогда не показываем
+      balance: normalizeBalance(res.balance),
+      demo: res.demo !== false,
+      payments: asArray(res.payments)
+        .map(normalizeWalletPayment)
+        .filter((p): p is WalletPayment => p !== null),
+    };
+  },
+
+  /** Зачисление на счёт (карта •••• 4242 → маска в истории операций). */
+  walletTopup(amount: number, cardNumber: string): Promise<{ balance: number | null }> {
+    return post<{ balance: number | null }>('/api/wallet/topup', { amount, cardNumber });
+  },
+
+  walletTransfer(
+    toUserId: string,
+    amount: number,
+    note?: string,
+  ): Promise<{ balance: number | null }> {
+    return post<{ balance: number | null }>('/api/wallet/transfer', {
+      toUserId,
+      amount,
+      ...(note ? { note } : {}),
+    });
+  },
+
+  /** Treasury of an org (rank ≥ 60) or my own credits from it (member). */
+  async orgFinance(orgId: string): Promise<OrgFinance> {
+    const res = await get<{
+      balance: unknown;
+      canManage: unknown;
+      transactions: unknown;
+      payrollTotals: unknown;
+    }>(`/api/orgs/${orgId}/finance`);
+    const totals = asArray(res.payrollTotals)
+      .map((raw): { user: User; total: number } | null => {
+        if (!isRecord(raw)) return null;
+        const user = unwrapUser(raw.user);
+        if (!user) return null;
+        return { user, total: typeof raw.total === 'number' ? raw.total : 0 };
+      })
+      .filter((t): t is { user: User; total: number } => t !== null);
+    return {
+      balance: typeof res.balance === 'number' ? res.balance : 0,
+      canManage: res.canManage === true,
+      transactions: asArray(res.transactions)
+        .map(normalizeFinanceTx)
+        .filter((t): t is OrgFinanceTx => t !== null),
+      payrollTotals: totals,
+    };
+  },
+
+  /** Move funds from my personal balance into the org treasury (rank ≥ 60). */
+  treasuryDeposit(
+    orgId: string,
+    amount: number,
+  ): Promise<{ balance: number; userBalance: number | null }> {
+    return post<{ balance: number; userBalance: number | null }>(
+      `/api/orgs/${orgId}/treasury/deposit`,
+      { amount },
+    );
+  },
+
+  /** Pay a salary from the treasury (rank ≥ 60). */
+  payroll(
+    orgId: string,
+    body: { userId: string; amount: number; note?: string },
+  ): Promise<{ orgBalance: number }> {
+    return post<{ orgBalance: number }>(`/api/orgs/${orgId}/payroll`, body);
+  },
+
+  /* ---------------- creator panel (SPEC v4 §23) ---------------- */
+
+  adminStats(): Promise<AdminStats> {
+    return get<AdminStats>('/api/admin/stats');
+  },
+
+  async adminAudit(opts: {
+    before?: string;
+    limit?: number;
+    action?: string;
+    q?: string;
+  }): Promise<{ items: AuditItem[]; hasMore: boolean }> {
+    const params = new URLSearchParams();
+    if (opts.before) params.set('before', opts.before);
+    params.set('limit', String(opts.limit ?? 50));
+    if (opts.action) params.set('action', opts.action);
+    if (opts.q) params.set('q', opts.q);
+    const res = await get<{ items: unknown; hasMore?: boolean }>(
+      `/api/admin/audit?${params.toString()}`,
+    );
+    return {
+      items: asArray(res.items)
+        .map(normalizeAuditItem)
+        .filter((i): i is AuditItem => i !== null),
+      hasMore: res.hasMore === true,
+    };
+  },
+
+  async adminLogins(limit = 50): Promise<LoginItem[]> {
+    const res = await get<{ items: unknown }>(`/api/admin/logins?limit=${limit}`);
+    return asArray(res.items)
+      .map(normalizeLoginItem)
+      .filter((i): i is LoginItem => i !== null);
+  },
+
+  async adminUsers(query: string, limit = 30): Promise<AdminUserRow[]> {
+    const params = new URLSearchParams();
+    if (query) params.set('query', query);
+    params.set('limit', String(limit));
+    const res = await get<{ items: unknown }>(`/api/admin/users?${params.toString()}`);
+    return asArray(res.items)
+      .map(normalizeAdminUser)
+      .filter((u): u is AdminUserRow => u !== null);
+  },
+
+  adminBan(id: string): Promise<{ ok: true; banned: true }> {
+    return post<{ ok: true; banned: true }>(`/api/admin/users/${id}/ban`);
+  },
+
+  adminUnban(id: string): Promise<{ ok: true; banned: false }> {
+    return post<{ ok: true; banned: false }>(`/api/admin/users/${id}/unban`);
+  },
+
+  adminBot(): Promise<BotSettings> {
+    return get<BotSettings>('/api/admin/bot');
+  },
+
+  adminBotSettings(body: { enabled?: boolean; events?: string[] }): Promise<BotSettings> {
+    return put<BotSettings>('/api/admin/bot', body);
+  },
+
+  /**
+   * Try to open (find-or-create) a DM with a user. The bot DM has no org and
+   * is created lazily by the server on the first bot report — for a brand new
+   * bot the request can fail with 400 «Укажите организацию и пользователя».
+   */
+  openDM(userId: string): Promise<{ channel: Channel; peer: User }> {
+    return post<{ channel: Channel; peer: User }>('/api/dms', { userId });
   },
 };
 

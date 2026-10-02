@@ -27,9 +27,9 @@ export const canViewOrgInvites = (rank: number): boolean => rank >= 40;
 /** Leave org (self) — anyone except owner. */
 export const canLeaveOrg = (actor: Actor): boolean => actor.role !== 'owner';
 
-/** Delete any message — author, or rank ≥ 60. */
+/** Delete any message — author, or rank ≥ 40 (SPEC §19: assistant_admin+). */
 export const canDeleteMessage = (senderId: string, actor: Actor): boolean =>
-  senderId === actor.id || actorRank(actor) >= 60;
+  senderId === actor.id || actorRank(actor) >= 40;
 
 /** Cancel pending invite — inviter self, or owner, or rank ≥ 60. */
 export const canCancelInvite = (actor: Actor, inviterId: string | null): boolean =>
@@ -56,6 +56,8 @@ export const assignableRoles = (actor: Actor, targetRole: Role): Role[] =>
 /**
  * Remove target from org — owner → anyone except owner; else actor.rank > target.rank.
  * Self-removal (leave) is always allowed and handled by the leave endpoint.
+ * NOTE: not used in the v2 UI — instant removal was replaced by dismissal
+ * documents (SPEC v2 §14.6); the endpoint stays for API compatibility.
  */
 export const canRemoveMember = (
   actor: Actor,
@@ -64,4 +66,19 @@ export const canRemoveMember = (
   if (target.id === actor.id) return true;
   if (target.role === 'owner') return false;
   return actorRank(actor) > roleRank(target.role);
+};
+
+/** View incoming applications / dismissals of an org — rank ≥ 40 (SPEC §19). */
+export const canViewStaffDocs = (rank: number): boolean => rank >= 40;
+
+/**
+ * Dismiss an employee (create a dismissal contract) / terminate unilaterally —
+ * owner, assistant_owner, admin only (rank ≥ 60) and rank must exceed the
+ * target's rank; the owner is untouchable (SPEC §19 + §12).
+ */
+export const canDismiss = (actor: Actor, target: { id: string; role: Role }): boolean => {
+  if (target.id === actor.id) return false;
+  if (target.role === 'owner') return false;
+  const r = actorRank(actor);
+  return r >= 60 && r > roleRank(target.role);
 };

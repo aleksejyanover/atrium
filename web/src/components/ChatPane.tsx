@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { api } from '../api';
 import { emitAck } from '../socket';
 import { useApp } from '../store';
 import { useCall } from './CallProvider';
 import { canDeleteMessage } from '../permissions';
-import { isRecord, unwrapUser, type Message, type User } from '../types';
+import { isRecord, pluralRu, unwrapUser, type Message, type ReadEntry, type User } from '../types';
 import { Avatar } from './Avatar';
 import { ConfirmModal } from './Modal';
 import { CallTargetModal } from './CallTargetModal';
@@ -23,14 +23,6 @@ function formatDay(ts: number): string {
   y.setDate(y.getDate() - 1);
   if (d.toDateString() === y.toDateString()) return 'Вчера';
   return dayFmt.format(d);
-}
-
-function pluralRu(n: number, one: string, few: string, many: string): string {
-  const mod10 = n % 10;
-  const mod100 = n % 100;
-  if (mod10 === 1 && mod100 !== 11) return one;
-  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
-  return many;
 }
 
 function upsertMessage(list: Message[], incoming: Message, tempId?: string): Message[] {
@@ -68,6 +60,7 @@ export function ChatPane({ channelId, onOpenNav }: ChatPaneProps) {
     openPanel,
     closePanel,
     toast,
+    setChannelUnread,
   } = useApp();
   const { startCall } = useCall();
 
@@ -82,6 +75,7 @@ export function ChatPane({ channelId, onOpenNav }: ChatPaneProps) {
   const [typingUsers, setTypingUsers] = useState<Record<string, TypingEntry>>({});
   const [deleteTarget, setDeleteTarget] = useState<Message | null>(null);
   const [callKind, setCallKind] = useState<'video' | 'audio' | null>(null);
+  const [reads, setReads] = useState<ReadEntry[]>([]);
 
   const listRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -92,6 +86,8 @@ export function ChatPane({ channelId, onOpenNav }: ChatPaneProps) {
   const lastTypingEmit = useRef(0);
   const userRef = useRef<User | null>(user);
   userRef.current = user;
+  const readSentAt = useRef(0);
+  const readTrailing = useRef<number | null>(null);
 
   messagesRef.current = messages;
 
@@ -103,6 +99,40 @@ export function ChatPane({ channelId, onOpenNav }: ChatPaneProps) {
     if (el) el.scrollTop = el.scrollHeight;
   }, []);
 
+  /* ------------- read receipts (SPEC v3 §18) ------------- */
+
+  const requestRead = useCallback(() => {
+    const now = Date.now();
+    const since = now - readSentAt.current;
+    const send = () => {
+      readSentAt.current = Date.now();
+      readTrailing.current = null;
+      void api
+        .markRead(channelId)
+        .then(() => setChannelUnread(channelId, 0))
+        .catch(() => undefined);
+    };
+    if (since >= 3000) {
+      send();
+    } else if (readTrailing.current === null) {
+      readTrailing.current = window.setTimeout(send, 3000 - since);
+    }
+  }, [channelId, setChannelUnread]);
+
+  useEffect(() => {
+    readSentAt.current = 0;
+    if (readTrailing.current !== null) {
+      window.clearTimeout(readTrailing.current);
+      readTrailing.current = null;
+    }
+    return () => {
+      if (readTrailing.current !== null) {
+        window.clearTimeout(readTrailing.current);
+        readTrailing.current = null;
+      }
+    };
+  }, [channelId]);
+
   /* ------------- load messages on channel switch ------------- */
 
   useEffect(() => {
@@ -111,6 +141,7 @@ export function ChatPane({ channelId, onOpenNav }: ChatPaneProps) {
     setMessages([]);
     setHasMore(false);
     setTypingUsers({});
+    setReads([]);
     atBottomRef.current = true;
     Object.values(typingTimers.current).forEach((t) => window.clearTimeout(t));
     typingTimers.current = {};
@@ -129,12 +160,19 @@ export function ChatPane({ channelId, onOpenNav }: ChatPaneProps) {
         if (!cancelled) setLoading(false);
       }
     })();
+    void api
+      .readStatus(channelId)
+      .then((r) => {
+        if (!cancelled) setReads(r);
+      })
+      .catch(() => undefined);
+    if (!cancelled) requestRead();
     return () => {
       cancelled = true;
     };
-  }, [channelId, scrollToBottom, toast]);
+  }, [channelId, requestRead, scrollToBottom, toast]);
 
-  /* ------------- socket: message:new + typing ------------- */
+  /* ------------- socket: message:new + typing + channel:read ------------- */
 
   useEffect(() => {
     if (!socket) return;
@@ -146,9 +184,33 @@ export function ChatPane({ channelId, onOpenNav }: ChatPaneProps) {
       const own = m.sender?.id !== undefined && m.sender.id === userRef.current?.id;
       const shouldScroll = atBottomRef.current || own;
       setMessages((prev) => upsertMessage(prev, m, m.tempId));
+      if (!own && atBottomRef.current) requestRead();
       if (shouldScroll) requestAnimationFrame(() => {
         const el = listRef.current;
         if (el) el.scrollTop = el.scrollHeight;
+      });
+    };
+
+    const onRead = (payload: unknown) => {
+      if (!isRecord(payload) || payload.channelId !== channelId) return;
+      const userId = typeof payload.userId === 'string' ? payload.userId : null;
+      const lastReadAt =
+        typeof payload.lastReadAt === 'number'
+          ? payload.lastReadAt
+          : typeof payload.last_read_at === 'number'
+            ? payload.last_read_at
+            : null;
+      if (!userId || lastReadAt === null) return;
+      if (userId === userRef.current?.id) return;
+      setReads((prev) => {
+        const idx = prev.findIndex((r) => r.userId === userId);
+        if (idx >= 0) {
+          if (prev[idx].lastReadAt >= lastReadAt) return prev;
+          const next = [...prev];
+          next[idx] = { userId, lastReadAt };
+          return next;
+        }
+        return [...prev, { userId, lastReadAt }];
       });
     };
 
@@ -180,13 +242,15 @@ export function ChatPane({ channelId, onOpenNav }: ChatPaneProps) {
 
     socket.on('message:new', onNew);
     socket.on('typing', onTyping);
+    socket.on('channel:read', onRead);
     return () => {
       socket.off('message:new', onNew);
       socket.off('typing', onTyping);
+      socket.off('channel:read', onRead);
       Object.values(typingTimers.current).forEach((t) => window.clearTimeout(t));
       typingTimers.current = {};
     };
-  }, [socket, channelId]);
+  }, [socket, channelId, requestRead]);
 
   /* ------------- pagination ------------- */
 
@@ -220,11 +284,13 @@ export function ChatPane({ channelId, onOpenNav }: ChatPaneProps) {
   const onScroll = useCallback(() => {
     const el = listRef.current;
     if (!el) return;
+    const wasAtBottom = atBottomRef.current;
     atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    if (atBottomRef.current && !wasAtBottom) requestRead();
     if (el.scrollTop < 60 && hasMore && !loadingOlderRef.current) {
       void loadOlder();
     }
-  }, [hasMore, loadOlder]);
+  }, [hasMore, loadOlder, requestRead]);
 
   /* ------------- send ------------- */
 
@@ -330,12 +396,15 @@ export function ChatPane({ channelId, onOpenNav }: ChatPaneProps) {
   /* ------------- header info ------------- */
 
   const membersCount = detail?.members.length ?? 0;
+  const isBotDm = !!dm && (dm.peer.username === 'atrium_bot' || dm.peer.id === 'u_bot');
   const title = dm ? dm.peer.displayName : (channel?.name ? `#${channel.name}` : 'Чат');
-  const subtitle = dm
-    ? online.has(dm.peer.id)
-      ? 'в сети'
-      : 'не в сети'
-    : `${membersCount} ${pluralRu(membersCount, 'участник', 'участника', 'участников')}`;
+  const subtitle = isBotDm
+    ? 'автоматические отчёты'
+    : dm
+      ? online.has(dm.peer.id)
+        ? 'в сети'
+        : 'не в сети'
+      : `${membersCount} ${pluralRu(membersCount, 'участник', 'участника', 'участников')}`;
 
   const typingList = Object.values(typingUsers);
   const typingText =
@@ -348,6 +417,37 @@ export function ChatPane({ channelId, onOpenNav }: ChatPaneProps) {
           : '';
 
   /* ------------- render messages ------------- */
+
+  const renderReadStatus = (m: Message): ReactNode => {
+    if (m.pending) return null;
+    if (dm) {
+      const peerRead = reads.find((r) => r.userId === dm.peer.id);
+      if (peerRead && peerRead.lastReadAt >= m.createdAt) {
+        return <div className="msg-read">Прочитано {timeFmt.format(peerRead.lastReadAt)}</div>;
+      }
+      return <div className="msg-read">✓ Доставлено</div>;
+    }
+    /* channel: only under the author's last own message */
+    const members = detail?.members ?? [];
+    const total = members.length;
+    if (total === 0) return null;
+    let lastOwnId: string | null = null;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].sender.id === user?.id && !messages[i].pending) {
+        lastOwnId = messages[i].id;
+        break;
+      }
+    }
+    if (m.id !== lastOwnId) return null;
+    const readCount = members.filter(
+      (mem) =>
+        mem.user.id === user?.id ||
+        reads.some((r) => r.userId === mem.user.id && r.lastReadAt >= m.createdAt),
+    ).length;
+    return (
+      <div className="msg-read">Прочитано: {readCount} из {total}</div>
+    );
+  };
 
   const renderMessages = () => {
     if (loading) return <div className="empty-state">Загрузка…</div>;
@@ -408,6 +508,7 @@ export function ChatPane({ channelId, onOpenNav }: ChatPaneProps) {
                     </div>
                   )}
                   <div className={m.pending ? 'bubble pending' : 'bubble'}>{m.text}</div>
+                  {own && renderReadStatus(m)}
                 </div>
                 {canDelete && !m.pending && (
                   <div className="msg-actions">
@@ -485,19 +586,25 @@ export function ChatPane({ channelId, onOpenNav }: ChatPaneProps) {
 
         <div className="spacer" />
 
-        <button className="icon-btn" title="Видеозвонок" onClick={() => requestCall('video')}>
-          <VideoIcon size={17} />
-        </button>
-        <button className="icon-btn" title="Аудиозвонок" onClick={() => requestCall('audio')}>
-          <PhoneIcon size={16} />
-        </button>
-        <button
-          className="icon-btn"
-          title="Информация об организации"
-          onClick={() => (panelOpen && panelTab === 'info' ? closePanel() : openPanel('info'))}
-        >
-          <InfoIcon size={17} />
-        </button>
+        {!isBotDm && (
+          <>
+            <button className="icon-btn" title="Видеозвонок" onClick={() => requestCall('video')}>
+              <VideoIcon size={17} />
+            </button>
+            <button className="icon-btn" title="Аудиозвонок" onClick={() => requestCall('audio')}>
+              <PhoneIcon size={16} />
+            </button>
+          </>
+        )}
+        {!isBotDm && (
+          <button
+            className="icon-btn"
+            title="Информация об организации"
+            onClick={() => (panelOpen && panelTab === 'info' ? closePanel() : openPanel('info'))}
+          >
+            <InfoIcon size={17} />
+          </button>
+        )}
       </div>
 
       <div className="messages" ref={listRef} onScroll={onScroll}>

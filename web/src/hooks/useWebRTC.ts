@@ -35,7 +35,7 @@ export interface CallState {
 
 export type ConnStatus = 'connecting' | 'connected' | 'lost';
 
-export type EndReason = 'reject' | 'ended' | null;
+export type EndReason = 'reject' | 'ended' | 'failed' | 'noanswer' | null;
 
 export interface WebRTCApi {
   phase: CallPhase;
@@ -52,12 +52,25 @@ export interface WebRTCApi {
   acceptCall: () => Promise<void>;
   rejectCall: () => Promise<void>;
   hangUp: () => Promise<void>;
+  dismissEnded: () => void;
   toggleMute: () => void;
   toggleCamera: () => void;
   switchCamera: () => Promise<void>;
 }
 
-const ICE_SERVERS: RTCIceServer[] = [{ urls: 'stun:stun.l.google.com:19302' }];
+/** Exact ICE set from SPEC v3 §21 (multi-STUN + openrelay TURN). */
+const ICE_SERVERS: RTCIceServer[] = [
+  { urls: ['stun:stun.cloudflare.com:3478', 'stun:stun.voipgate.com:3478',
+           'stun:stun.sipgate.net:3478', 'stun:stun.l.google.com:19302'] },
+  { urls: ['turn:openrelay.metered.ca:80', 'turn:openrelay.metered.ca:443',
+           'turn:openrelay.metered.ca:443?tcp'],
+    username: 'openrelayproject', credential: 'openrelayproject' },
+];
+
+/** §21: never leave the user in an endless connecting state. */
+const CONNECT_TIMEOUT_MS = 20000;
+/** §21: callee did not pick up within ~30s. */
+const RING_TIMEOUT_MS = 30000;
 
 async function acquireMedia(kind: CallKind): Promise<MediaStream> {
   const md = navigator.mediaDevices;
@@ -114,6 +127,8 @@ export function useWebRTC(socket: Socket | null, notify: Notify): WebRTCApi {
   const mutedRef = useRef(false);
   const cameraOffRef = useRef(false);
   const endedTimerRef = useRef<number | null>(null);
+  const connectTimerRef = useRef<number | null>(null);
+  const ringTimerRef = useRef<number | null>(null);
 
   const notifyRef = useRef<Notify>(notify);
   useEffect(() => {
@@ -125,16 +140,33 @@ export function useWebRTC(socket: Socket | null, notify: Notify): WebRTCApi {
     setPhase(p);
   }, []);
 
+  const clearConnectTimer = useCallback(() => {
+    if (connectTimerRef.current !== null) {
+      window.clearTimeout(connectTimerRef.current);
+      connectTimerRef.current = null;
+    }
+  }, []);
+
+  const clearRingTimer = useCallback(() => {
+    if (ringTimerRef.current !== null) {
+      window.clearTimeout(ringTimerRef.current);
+      ringTimerRef.current = null;
+    }
+  }, []);
+
   /** Full teardown of media/pc/call, back to idle. */
   const hardReset = useCallback(() => {
     if (endedTimerRef.current !== null) {
       window.clearTimeout(endedTimerRef.current);
       endedTimerRef.current = null;
     }
+    clearConnectTimer();
+    clearRingTimer();
     const pc = pcRef.current;
     pcRef.current = null;
     if (pc) {
       pc.onconnectionstatechange = null;
+      pc.oniceconnectionstatechange = null;
       pc.onicecandidate = null;
       pc.ontrack = null;
       try {
@@ -160,15 +192,25 @@ export function useWebRTC(socket: Socket | null, notify: Notify): WebRTCApi {
     setCall(null);
     callRef.current = null;
     go('idle');
-  }, [go]);
+  }, [go, clearConnectTimer, clearRingTimer]);
 
-  /** Teardown that briefly shows an "ended" card with a reason, then idle. */
+  /** Teardown that shows an "ended" card with a reason, then idle (except `failed`,
+   *  which waits for the user to press «Завершить» — SPEC v3 §21). */
   const endWithReason = useCallback(
     (reason: Exclude<EndReason, null>) => {
+      if (phaseRef.current === 'ended' || phaseRef.current === 'idle') return;
+      if (endedTimerRef.current !== null) {
+        window.clearTimeout(endedTimerRef.current);
+        endedTimerRef.current = null;
+      }
+      clearConnectTimer();
+      clearRingTimer();
+      const c = callRef.current;
       const pc = pcRef.current;
       pcRef.current = null;
       if (pc) {
         pc.onconnectionstatechange = null;
+        pc.oniceconnectionstatechange = null;
         pc.onicecandidate = null;
         pc.ontrack = null;
         try {
@@ -190,19 +232,46 @@ export function useWebRTC(socket: Socket | null, notify: Notify): WebRTCApi {
       setPeerMuted(false);
       setPeerCameraOff(false);
       setConnStatus('connecting');
-      setCall(null);
-      callRef.current = null;
       setEndReason(reason);
       go('ended');
-      if (endedTimerRef.current !== null) window.clearTimeout(endedTimerRef.current);
-      endedTimerRef.current = window.setTimeout(() => {
-        endedTimerRef.current = null;
-        setEndReason(null);
-        go('idle');
-      }, 2600);
+      /* let the peer's UI stop too when we are the ones giving up */
+      if (socket && c && c.callId && (reason === 'failed' || reason === 'noanswer')) {
+        void emitAck(socket, 'call:leave', { callId: c.callId });
+      }
+      if (reason !== 'failed') {
+        endedTimerRef.current = window.setTimeout(() => {
+          endedTimerRef.current = null;
+          hardReset();
+        }, 2600);
+      }
     },
-    [go],
+    [clearConnectTimer, clearRingTimer, go, hardReset, socket],
   );
+
+  /** §21: 20s in connecting without `connected` → clear error, no endless wait. */
+  const armConnectTimer = useCallback(() => {
+    if (connectTimerRef.current !== null) return;
+    connectTimerRef.current = window.setTimeout(() => {
+      connectTimerRef.current = null;
+      if (phaseRef.current !== 'connecting') return;
+      notifyRef.current(
+        'Не удалось установить соединение. Проверьте интернет у собеседника',
+        'error',
+      );
+      endWithReason('failed');
+    }, CONNECT_TIMEOUT_MS);
+  }, [endWithReason]);
+
+  /** §21: caller waits ~30s for the callee to pick up, then «не отвечает». */
+  const armRingTimer = useCallback(() => {
+    clearRingTimer();
+    ringTimerRef.current = window.setTimeout(() => {
+      ringTimerRef.current = null;
+      if (phaseRef.current !== 'outgoing') return;
+      notifyRef.current('Собеседник не отвечает', 'error');
+      endWithReason('noanswer');
+    }, RING_TIMEOUT_MS);
+  }, [clearRingTimer, endWithReason]);
 
   const flushIce = useCallback(async (pc: RTCPeerConnection) => {
     const queued = pendingIceRef.current;
@@ -283,17 +352,47 @@ export function useWebRTC(socket: Socket | null, notify: Notify): WebRTCApi {
         if (pcRef.current !== pc) return;
         const s = pc.connectionState;
         if (s === 'connected') {
+          clearConnectTimer();
           setConnStatus('connected');
           if (phaseRef.current === 'connecting' || phaseRef.current === 'outgoing') go('active');
-        } else if (s === 'disconnected' || s === 'failed' || s === 'closed') {
+        } else if (s === 'failed') {
+          setConnStatus('lost');
+          if (phaseRef.current === 'connecting' || phaseRef.current === 'active') {
+            notifyRef.current(
+              'Не удалось установить соединение. Проверьте интернет у собеседника',
+              'error',
+            );
+            endWithReason('failed');
+          }
+        } else if (s === 'disconnected' || s === 'closed') {
+          /* §21: transient loss → «Соединение нестабильно», keep the call alive */
           setConnStatus('lost');
         } else {
           setConnStatus('connecting');
         }
       };
+      pc.oniceconnectionstatechange = () => {
+        if (pcRef.current !== pc) return;
+        const s = pc.iceConnectionState;
+        if (s === 'failed') {
+          setConnStatus('lost');
+          if (phaseRef.current === 'connecting' || phaseRef.current === 'active') {
+            notifyRef.current(
+              'Не удалось установить соединение. Проверьте интернет у собеседника',
+              'error',
+            );
+            endWithReason('failed');
+          }
+        } else if (s === 'disconnected') {
+          setConnStatus('lost');
+        } else if (s === 'connected' || s === 'completed') {
+          clearConnectTimer();
+          setConnStatus('connected');
+        }
+      };
       return pc;
     },
-    [go, socket],
+    [clearConnectTimer, endWithReason, go, socket],
   );
 
   /* ---------------- actions ---------------- */
@@ -326,6 +425,12 @@ export function useWebRTC(socket: Socket | null, notify: Notify): WebRTCApi {
         hardReset();
         return;
       }
+      /* the user may have cancelled while we were asking for permissions */
+      const phaseAfterMedia = phaseRef.current as CallPhase;
+      if (phaseAfterMedia !== 'outgoing' || callRef.current !== c) {
+        stream.getTracks().forEach((t) => t.stop());
+        return;
+      }
       localRef.current = stream;
       setLocalStream(stream);
 
@@ -333,15 +438,32 @@ export function useWebRTC(socket: Socket | null, notify: Notify): WebRTCApi {
         socket,
         'call:invite',
         { calleeId: peer.id, kind, channelId },
+        12000, /* §21: invite must be acked within 12s — no endless «Вызов…» */
       );
+      const phaseAfterAck = phaseRef.current as CallPhase;
+      if (phaseAfterAck !== 'outgoing' || callRef.current !== c) {
+        /* cancelled during the ack — release everything we picked up */
+        stream.getTracks().forEach((t) => t.stop());
+        if (localRef.current === stream) {
+          localRef.current = null;
+          setLocalStream(null);
+        }
+        if (typeof res.callId === 'string' && res.ok) {
+          void emitAck(socket, 'call:leave', { callId: res.callId });
+        }
+        return;
+      }
       if (!res.ok || typeof res.callId !== 'string') {
-        notifyRef.current(res.error ?? 'Не удалось начать звонок', 'error');
+        const reason =
+          res.error === 'Сервер не ответил' ? 'Собеседник не отвечает' : res.error;
+        notifyRef.current(reason ?? 'Не удалось начать звонок', 'error');
         hardReset();
         return;
       }
       const invited: CallState = { ...c, callId: res.callId };
       callRef.current = invited;
       setCall(invited);
+      armRingTimer();
 
       const pc = createPc(invited);
       pcRef.current = pc;
@@ -359,7 +481,7 @@ export function useWebRTC(socket: Socket | null, notify: Notify): WebRTCApi {
         hardReset();
       }
     },
-    [createPc, go, hardReset, socket],
+    [armRingTimer, createPc, go, hardReset, socket],
   );
 
   const acceptCall = useCallback(async () => {
@@ -372,6 +494,7 @@ export function useWebRTC(socket: Socket | null, notify: Notify): WebRTCApi {
       return;
     }
     go('connecting');
+    armConnectTimer();
     let stream: MediaStream;
     try {
       stream = await acquireMedia(c.kind);
@@ -379,6 +502,13 @@ export function useWebRTC(socket: Socket | null, notify: Notify): WebRTCApi {
       notifyRef.current('Нет доступа к микрофону или камере', 'error');
       void emitAck(socket, 'call:leave', { callId: c.callId });
       hardReset();
+      return;
+    }
+    /* the remote side may have hung up while we asked for permissions */
+    const phaseAfterMedia = phaseRef.current as CallPhase;
+    if (phaseAfterMedia !== 'connecting' || callRef.current !== c) {
+      stream.getTracks().forEach((t) => t.stop());
+      void emitAck(socket, 'call:leave', { callId: c.callId });
       return;
     }
     localRef.current = stream;
@@ -390,7 +520,7 @@ export function useWebRTC(socket: Socket | null, notify: Notify): WebRTCApi {
     pendingSdpRef.current = null;
     if (buffered) await applySdp(buffered);
     await flushIce(pc);
-  }, [applySdp, createPc, flushIce, go, hardReset, socket]);
+  }, [applySdp, armConnectTimer, createPc, flushIce, go, hardReset, socket]);
 
   const rejectCall = useCallback(async () => {
     const c = callRef.current;
@@ -505,29 +635,37 @@ export function useWebRTC(socket: Socket | null, notify: Notify): WebRTCApi {
 
     const onAccepted = (p: unknown) => {
       if (!sameCall(p)) return;
-      if (phaseRef.current === 'outgoing') go('connecting');
+      if (phaseRef.current === 'outgoing') {
+        clearRingTimer();
+        go('connecting');
+        armConnectTimer();
+      }
     };
 
     const onRejected = (p: unknown) => {
       if (!sameCall(p)) return;
+      if (phaseRef.current === 'ended' || phaseRef.current === 'idle') return;
       if (phaseRef.current === 'outgoing') endWithReason('reject');
       else hardReset();
     };
 
     const onLeft = (p: unknown) => {
       if (!sameCall(p)) return;
+      if (phaseRef.current === 'ended' || phaseRef.current === 'idle') return;
       if (phaseRef.current === 'incoming' || phaseRef.current === 'outgoing') hardReset();
       else endWithReason('ended');
     };
 
     const onState = (p: unknown) => {
       if (!sameCall(p) || !isRecord(p)) return;
+      if (phaseRef.current === 'ended' || phaseRef.current === 'idle') return;
       setPeerMuted(p.muted === true);
       setPeerCameraOff(p.cameraOff === true);
     };
 
     const onSdp = (p: unknown) => {
       if (!sameCall(p) || !isRecord(p)) return;
+      if (phaseRef.current === 'ended' || phaseRef.current === 'idle') return;
       if (isRecord(p.sdp) && typeof p.sdp.type === 'string') {
         void applySdp(p.sdp as unknown as RTCSessionDescriptionInit);
       }
@@ -535,6 +673,7 @@ export function useWebRTC(socket: Socket | null, notify: Notify): WebRTCApi {
 
     const onIce = (p: unknown) => {
       if (!sameCall(p) || !isRecord(p)) return;
+      if (phaseRef.current === 'ended' || phaseRef.current === 'idle') return;
       if (isRecord(p.candidate)) {
         void applyIce(p.candidate as RTCIceCandidateInit);
       }
@@ -557,12 +696,27 @@ export function useWebRTC(socket: Socket | null, notify: Notify): WebRTCApi {
       socket.off('rtc:sdp', onSdp);
       socket.off('rtc:ice', onIce);
     };
-  }, [applyIce, applySdp, endWithReason, go, hardReset, socket]);
+  }, [
+    applyIce,
+    applySdp,
+    armConnectTimer,
+    clearRingTimer,
+    endWithReason,
+    go,
+    hardReset,
+    socket,
+  ]);
+
+  const dismissEnded = useCallback(() => {
+    hardReset();
+  }, [hardReset]);
 
   /* unmount: release media without touching state */
   useEffect(() => {
     return () => {
       if (endedTimerRef.current !== null) window.clearTimeout(endedTimerRef.current);
+      if (connectTimerRef.current !== null) window.clearTimeout(connectTimerRef.current);
+      if (ringTimerRef.current !== null) window.clearTimeout(ringTimerRef.current);
       pcRef.current?.close();
       pcRef.current = null;
       localRef.current?.getTracks().forEach((t) => t.stop());
@@ -585,6 +739,7 @@ export function useWebRTC(socket: Socket | null, notify: Notify): WebRTCApi {
     acceptCall,
     rejectCall,
     hangUp,
+    dismissEnded,
     toggleMute,
     toggleCamera,
     switchCamera,

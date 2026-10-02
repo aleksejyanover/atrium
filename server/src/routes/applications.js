@@ -160,14 +160,19 @@ router.post('/applications/:id/accept', requireAuth, (req, res, next) => {
     const now = Date.now()
     run("UPDATE documents SET status = 'approved', resolved_at = ? WHERE id = ?", now, doc.id)
 
-    // membership with role `member` (§12: роль member всегда)
+    // membership: §12 — role `member` always; SPEC v5 §29 — a card owner (is_owner)
+    // always becomes `owner` (several owners per org are allowed).
+    const applicant = findUserById(doc.target_user_id)
+    const role = applicant?.is_owner ? 'owner' : 'member'
     if (!findMember(org.id, doc.target_user_id)) {
       run('INSERT INTO members (org_id, user_id, role, joined_at) VALUES (?,?,?,?)',
-        org.id, doc.target_user_id, 'member', now)
+        org.id, doc.target_user_id, role, now)
       const channels = all("SELECT id FROM channels WHERE org_id = ? AND type = 'channel'", org.id)
       for (const c of channels) {
         run('INSERT OR IGNORE INTO channel_members (channel_id, user_id) VALUES (?,?)', c.id, doc.target_user_id)
       }
+    } else if (role === 'owner') {
+      run('UPDATE members SET role = ? WHERE org_id = ? AND user_id = ?', role, org.id, doc.target_user_id)
     }
 
     const application = documentDto(get('SELECT * FROM documents WHERE id = ?', doc.id))
@@ -175,7 +180,7 @@ router.post('/applications/:id/accept', requireAuth, (req, res, next) => {
     emitToOrg(org.id, 'member:joined', {
       orgId: org.id,
       user: publicUser(findUserById(doc.target_user_id)),
-      role: 'member',
+      role,
     })
     logActivity(org.id, 'application.approved', {
       actorId: req.userId,

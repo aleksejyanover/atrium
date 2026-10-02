@@ -4,12 +4,11 @@ import { ActivityIndicator, ScrollView, StyleSheet, Text, View } from 'react-nat
 
 import { Button, Empty } from '@/components/controls';
 import { AuthGuard, ScreenHeader } from '@/components/screen';
-import { DemoBanner } from '@/components/wallet/demo-banner';
 import { PaymentRow } from '@/components/wallet/payment-row';
 import { TopupModal } from '@/components/wallet/topup-modal';
 import { TransferModal } from '@/components/wallet/transfer-modal';
 import { walletApi } from '@/lib/endpoints';
-import { rub } from '@/lib/format';
+import { formatBalance, rub } from '@/lib/format';
 import { colors, radius } from '@/lib/theme';
 import { WalletPayment } from '@/lib/types';
 import { useAuth } from '@/state/auth';
@@ -36,7 +35,6 @@ function walletRowProps(p: WalletPayment) {
       return {
         title: 'Пополнение с карты',
         meta: p.cardMask ? `Карта ${p.cardMask}` : null,
-        demo: true,
       };
     case 'transfer':
       return incoming
@@ -66,7 +64,7 @@ function WalletScreen() {
   const { show } = useToast();
   const { user, refreshMe } = useAuth();
 
-  const [data, setData] = useState<{ balance: number; payments: WalletPayment[] } | null>(null);
+  const [data, setData] = useState<{ balance: number | null; payments: WalletPayment[] } | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [topupOpen, setTopupOpen] = useState(false);
@@ -96,21 +94,23 @@ function WalletScreen() {
     void refreshMe();
   });
 
-  const balance = data?.balance ?? user?.balance ?? 0;
+  // Владелец: isOwner или balance === null → «∞» (SPEC v5 §29–30).
+  const isOwner = !!user?.isOwner;
+  const balance: number | null = data ? data.balance : (user?.balance ?? 0);
   const payments = data?.payments ?? [];
 
   const onTopup = (amount: number) => {
     setTopupOpen(false);
     void load();
     void refreshMe();
-    show(`Пополнение: +${rub(amount)}`);
+    show(`Операция выполнена: +${rub(amount)}`);
   };
 
   const onTransfer = (amount: number, to: { displayName: string }) => {
     setTransferOpen(false);
     void load();
     void refreshMe();
-    show(`Перевод: −${rub(amount)} → ${to.displayName}`);
+    show(`Операция выполнена: −${rub(amount)} → ${to.displayName}`);
   };
 
   if (loading && !data) {
@@ -128,7 +128,7 @@ function WalletScreen() {
     <View style={styles.screen}>
       <ScreenHeader
         title="Кошелёк"
-        subtitle="Демо-режим · реальные деньги не участвуют"
+        subtitle="Баланс и история операций"
         onBack={() => router.back()}
       />
 
@@ -138,10 +138,12 @@ function WalletScreen() {
         {/* ---- баланс ---- */}
         <View style={styles.balanceCard}>
           <Text style={styles.balanceLabel}>Баланс</Text>
-          <Text style={styles.balanceValue}>{rub(balance)}</Text>
+          <Text style={[styles.balanceValue, isOwner && styles.balanceValueOwner]}>
+            {formatBalance(balance, isOwner)}
+          </Text>
           <View style={styles.rowButtons}>
             <Button
-              title="Пополнить"
+              title="Пополнить счёт"
               icon="plus"
               onPress={() => setTopupOpen(true)}
               style={{ flex: 1 }}
@@ -156,15 +158,13 @@ function WalletScreen() {
           </View>
         </View>
 
-        <DemoBanner />
-
         {/* ---- история операций ---- */}
         <Text style={styles.sectionTitle}>История операций</Text>
 
         {error && data ? <Text style={styles.error}>{error}</Text> : null}
 
         {!error && payments.length === 0 ? (
-          <Empty text={'Операций пока нет\nПополните кошелёк, чтобы начать'} />
+          <Empty text={'Операций пока нет\nПополните счёт, чтобы начать'} />
         ) : null}
 
         {payments.map((p) => (
@@ -247,6 +247,9 @@ const styles = StyleSheet.create({
     fontSize: 40,
     fontWeight: '700',
     marginVertical: 6,
+  },
+  balanceValueOwner: {
+    color: colors.gold,
   },
   rowButtons: {
     flexDirection: 'row',

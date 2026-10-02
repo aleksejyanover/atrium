@@ -1,17 +1,22 @@
 import { useEffect, useRef, useState } from 'react';
 import { useApp } from '../store';
 import { canCreateChannel } from '../permissions';
-import { roleLabel, roleRank } from '../types';
+import { roleLabel, roleRank, formatRub } from '../types';
 import { Avatar } from './Avatar';
 import { CreateOrgModal } from './CreateOrgModal';
 import { CreateChannelModal } from './CreateChannelModal';
 import {
+  ClipboardIcon,
   ChevronDownIcon,
   CheckIcon,
+  DashboardIcon,
+  FileTextIcon,
+  GlobeIcon,
   HashIcon,
   LogOutIcon,
   MailIcon,
   PlusIcon,
+  WalletIcon,
 } from './icons';
 
 interface SidebarProps {
@@ -31,6 +36,9 @@ export function Sidebar({ open, onNavigate }: SidebarProps) {
     online,
     view,
     selectedChannelId,
+    myApplications,
+    incomingApplications,
+    myDocuments,
     selectOrg,
     selectChannel,
     setView,
@@ -44,7 +52,21 @@ export function Sidebar({ open, onNavigate }: SidebarProps) {
 
   const currentOrg = orgs.find((o) => o.id === currentOrgId) ?? null;
   const rank = detail ? roleRank(detail.role) : 0;
-  const orgDMs = detail ? dms.filter((d) => d.org.id === detail.org.id) : [];
+  const orgDMs = dms.filter((d) => (detail ? d.org === null || d.org.id === detail.org.id : d.org === null));
+
+  const pendingIncoming = incomingApplications.filter((a) => a.application.status === 'pending').length;
+  const pendingMine = myApplications.filter((a) => a.application.status === 'pending').length;
+  const appsBadge = pendingIncoming + pendingMine;
+  const docsBadge = myDocuments.filter((d) => d.document.status === 'pending').length;
+
+  // SPEC v5 §29/§30: у карточки владельца баланс «∞» (isOwner / balance === null)
+  const balanceBadge = user
+    ? user.isOwner === true || user.balance === null
+      ? '∞'
+      : typeof user.balance === 'number'
+        ? formatRub(user.balance)
+        : null
+    : null;
 
   useEffect(() => {
     if (!orgMenu) return;
@@ -63,6 +85,11 @@ export function Sidebar({ open, onNavigate }: SidebarProps) {
 
   const openChannel = (id: string) => {
     selectChannel(id);
+    onNavigate();
+  };
+
+  const go = (v: 'catalog' | 'applications' | 'documents' | 'invites' | 'profile' | 'wallet' | 'admin') => {
+    setView(v);
     onNavigate();
   };
 
@@ -113,6 +140,33 @@ export function Sidebar({ open, onNavigate }: SidebarProps) {
       </div>
 
       <div className="side-scroll">
+        {/* catalog (SPEC v2 §14.1) */}
+        <div className="side-section">
+          <button
+            className={view === 'catalog' ? 'side-item active' : 'side-item'}
+            onClick={() => go('catalog')}
+          >
+            <GlobeIcon size={15} />
+            <span className="grow">Каталог организаций</span>
+          </button>
+          <button
+            className={view === 'wallet' ? 'side-item active' : 'side-item'}
+            onClick={() => go('wallet')}
+          >
+            <WalletIcon size={15} />
+            <span className="grow">Кошелёк</span>
+            {balanceBadge !== null && (
+              <span
+                className={
+                  balanceBadge === '∞' ? 'badge balance-badge inf' : 'badge balance-badge'
+                }
+              >
+                {balanceBadge}
+              </span>
+            )}
+          </button>
+        </div>
+
         {/* channels */}
         <div className="side-section">
           <div className="side-section-head">
@@ -143,6 +197,7 @@ export function Sidebar({ open, onNavigate }: SidebarProps) {
             >
               <HashIcon className="hash" size={15} />
               <span className="grow">{c.name}</span>
+              {!!c.unread && c.unread > 0 && <span className="badge">{c.unread}</span>}
             </button>
           ))}
         </div>
@@ -173,18 +228,34 @@ export function Sidebar({ open, onNavigate }: SidebarProps) {
                 online={online.has(d.peer.id)}
               />
               <span className="grow">{d.peer.displayName}</span>
+              {!!d.channel.unread && d.channel.unread > 0 && (
+                <span className="badge">{d.channel.unread}</span>
+              )}
             </button>
           ))}
         </div>
 
-        {/* incoming invites */}
+        {/* applications / documents / invites (SPEC v2 §14.3–14.4) */}
         <div className="side-section">
           <button
+            className={view === 'applications' ? 'side-item active' : 'side-item'}
+            onClick={() => go('applications')}
+          >
+            <ClipboardIcon size={15} />
+            <span className="grow">Заявления</span>
+            {appsBadge > 0 && <span className="badge">{appsBadge}</span>}
+          </button>
+          <button
+            className={view === 'documents' ? 'side-item active' : 'side-item'}
+            onClick={() => go('documents')}
+          >
+            <FileTextIcon size={15} />
+            <span className="grow">Документы</span>
+            {docsBadge > 0 && <span className="badge danger-badge">{docsBadge}</span>}
+          </button>
+          <button
             className={view === 'invites' ? 'side-item active' : 'side-item'}
-            onClick={() => {
-              setView('invites');
-              onNavigate();
-            }}
+            onClick={() => go('invites')}
           >
             <MailIcon size={15} />
             <span className="grow">Входящие приглашения</span>
@@ -193,13 +264,32 @@ export function Sidebar({ open, onNavigate }: SidebarProps) {
         </div>
       </div>
 
+      {/* superadmin panel (SPEC v4 §25) — rendered only for creators */}
+      {user?.isAdmin && (
+        <div className="side-section side-admin">
+          <button
+            className={view === 'admin' ? 'side-item active' : 'side-item accent-item'}
+            onClick={() => go('admin')}
+          >
+            <DashboardIcon size={15} />
+            <span className="grow">Панель создателя</span>
+          </button>
+        </div>
+      )}
+
       {/* profile */}
       <div className="side-profile">
-        <Avatar name={user?.displayName ?? '?'} color={user?.avatarColor ?? '#7C6CF6'} size={34} />
-        <div className="who">
-          <div className="nm">{user?.displayName ?? ''}</div>
-          <div className="un">@{user?.username ?? ''}</div>
-        </div>
+        <button
+          className={view === 'profile' ? 'profile-btn active' : 'profile-btn'}
+          onClick={() => go('profile')}
+          title="Профиль"
+        >
+          <Avatar name={user?.displayName ?? '?'} color={user?.avatarColor ?? '#7C6CF6'} size={34} />
+          <div className="who">
+            <div className="nm">{user?.displayName ?? ''}</div>
+            <div className="un">@{user?.username ?? ''}</div>
+          </div>
+        </button>
         <button className="icon-btn danger" title="Выйти" onClick={logout}>
           <LogOutIcon size={16} />
         </button>

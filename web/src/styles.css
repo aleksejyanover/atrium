@@ -14,6 +14,11 @@
   --danger: #f0506e;
   --ok: #3ecf8e;
 
+  /* золотой акцент карточки владельца (SPEC v5 §29/§30) */
+  --gold: #f5be41;
+  --gold-soft: rgba(245, 190, 65, 0.15);
+  --gold-line: rgba(245, 190, 65, 0.4);
+
   --radius: 12px;
   --radius-sm: 10px;
   --radius-lg: 14px;
@@ -1463,6 +1468,13 @@ a:hover {
   margin-top: 3px;
 }
 
+.call-card .sub.error {
+  color: #ff8ea3;
+  font-size: 13px;
+  line-height: 1.5;
+  margin-top: 8px;
+}
+
 .call-avatar {
   position: relative;
   width: 84px;
@@ -1780,9 +1792,541 @@ a:hover {
   display: none;
 }
 
+/* ---------------- read receipts (SPEC v3 §18) ---------------- */
+
+.msg-read {
+  font-size: 10.5px;
+  color: var(--muted);
+  margin-top: 3px;
+  text-align: right;
+  letter-spacing: 0.01em;
+}
+
+.msg-row:not(.own) .msg-read {
+  text-align: left;
+}
+
+/* ---------------- link button ---------------- */
+
+.link-btn {
+  color: var(--accent);
+  font-size: 12.5px;
+  font-weight: 500;
+  transition: color var(--transition);
+  text-align: left;
+}
+
+.link-btn:hover {
+  color: var(--accent-2);
+  text-decoration: underline;
+}
+
+/* ---------------- status badges (applications / documents) ---------------- */
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  white-space: nowrap;
+  flex: none;
+}
+
+.status-badge.pending {
+  color: #d9b45a;
+  border-color: rgba(217, 180, 90, 0.4);
+  background: rgba(217, 180, 90, 0.1);
+}
+
+.status-badge.approved,
+.status-badge.signed {
+  color: var(--ok);
+  border-color: rgba(62, 207, 142, 0.4);
+  background: rgba(62, 207, 142, 0.1);
+}
+
+.status-badge.rejected {
+  color: var(--danger);
+  border-color: rgba(240, 80, 110, 0.4);
+  background: rgba(240, 80, 110, 0.1);
+}
+
+.status-badge.accent {
+  color: var(--accent);
+  border-color: rgba(124, 108, 246, 0.45);
+  background: rgba(124, 108, 246, 0.1);
+}
+
+.status-badge.dismiss-badge {
+  margin-left: 6px;
+}
+
+.danger-badge {
+  background: var(--danger);
+}
+
+/* ---------------- screens: lists & quotes ---------------- */
+
+.list-column {
+  max-width: 760px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.quote-box {
+  background: var(--bg);
+  border-left: 2px solid var(--accent);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  padding: 8px 12px;
+  margin-top: 10px;
+  font-size: 13px;
+  color: var(--text);
+  white-space: pre-wrap;
+}
+
+.contract-toggle {
+  margin-top: 8px;
+}
+
+.contract-box.small {
+  max-height: 180px;
+  margin-top: 8px;
+  font-size: 12.5px;
+}
+
+.history-entry {
+  margin-top: 4px;
+}
+
+/* ---------------- catalog (SPEC v2 §14.1) ---------------- */
+
+.catalog-search {
+  max-width: 760px;
+  margin: 0 auto 18px;
+}
+
+.catalog-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 14px;
+  max-width: 1000px;
+  margin: 0 auto;
+}
+
+.org-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  transition: border-color var(--transition), transform var(--transition);
+}
+
+.org-card:hover {
+  border-color: rgba(124, 108, 246, 0.4);
+}
+
+.org-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.org-card-name {
+  font-size: 15px;
+  font-weight: 700;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.org-card-desc {
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.55;
+  flex: 1;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.org-card-meta {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.org-card-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* ---------------- toggle (SPEC v2 §14.5) ---------------- */
+
+.toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  width: 100%;
+  text-align: left;
+  padding: 4px 0;
+}
+
+.toggle-track {
+  position: relative;
+  width: 38px;
+  height: 22px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  transition: background var(--transition), border-color var(--transition);
+  flex: none;
+}
+
+.toggle-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--muted);
+  transition: transform var(--transition), background var(--transition);
+}
+
+.toggle-row.on .toggle-track {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.toggle-row.on .toggle-thumb {
+  transform: translateX(16px);
+  background: #fff;
+}
+
+.toggle-label {
+  font-size: 13.5px;
+  color: var(--text);
+}
+
+.toggle-row:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* ---------------- saved signature panel (SPEC v3 §17) ---------------- */
+
+.sig-saved {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  transition: border-color var(--transition);
+}
+
+.sig-saved.active {
+  border-color: rgba(62, 207, 142, 0.45);
+}
+
+.sig-saved.hint-banner {
+  color: var(--muted);
+}
+
+.sig-saved-preview {
+  flex: none;
+  width: 132px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 40px;
+  overflow: hidden;
+}
+
+.sig-saved-body {
+  flex: 1;
+  min-width: 160px;
+}
+
+.sig-saved-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.sig-saved-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sig-saved .link-btn {
+  flex-basis: 100%;
+}
+
+.hint-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  background: rgba(124, 108, 246, 0.07);
+  border: 1px dashed rgba(124, 108, 246, 0.35);
+  border-radius: var(--radius-sm);
+  padding: 11px 13px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+/* signature rendering */
+
+.sig-img {
+  display: block;
+  width: 100%;
+  max-width: 320px;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.sig-img.compact {
+  max-width: 120px;
+}
+
+.sig-text {
+  font-family: 'Caveat', cursive;
+  font-size: 30px;
+  line-height: 1.1;
+  color: var(--text);
+}
+
+.sig-text.large {
+  font-size: 40px;
+}
+
+.typed-sig-preview {
+  background: var(--bg);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  min-height: 76px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px;
+  margin-bottom: 14px;
+}
+
+/* profile signature empty state */
+
+.sig-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  text-align: center;
+}
+
+.sig-stub {
+  width: 100%;
+  max-width: 300px;
+  height: 74px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-bottom: 8px;
+}
+
+.sig-stub-line {
+  height: 8px;
+  width: 70%;
+  border-radius: 4px;
+  background: linear-gradient(90deg, rgba(124, 108, 246, 0.35), rgba(124, 108, 246, 0.06));
+}
+
+.sig-stub-line.short {
+  width: 42%;
+}
+
+.sig-empty-actions {
+  display: flex;
+  gap: 9px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+/* ---------------- profile screen ---------------- */
+
+.profile-card .profile-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 16px;
+}
+
+.profile-btn {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 9px;
+  border-radius: var(--radius-sm);
+  transition: background var(--transition);
+  text-align: left;
+}
+
+.profile-btn:hover,
+.profile-btn.active {
+  background: var(--panel-2);
+}
+
+.profile-btn .who {
+  min-width: 0;
+}
+
+.profile-btn .who .nm {
+  font-size: 13.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.profile-btn .who .un {
+  font-size: 11.5px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------------- dismissals (SPEC v2 §14.6) ---------------- */
+
+.dismiss-note {
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.55;
+  margin: 0 0 14px;
+}
+
+.member-row-wrap {
+  margin-bottom: 2px;
+}
+
+.member-dismiss {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 4px 8px 10px;
+}
+
+/* ---------------- activity log (SPEC v3 §18) ---------------- */
+
+.activity-item {
+  display: flex;
+  gap: 10px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--border);
+  align-items: flex-start;
+}
+
+.activity-item:last-child {
+  border-bottom: none;
+}
+
+.activity-dot {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  flex: none;
+}
+
+.activity-body {
+  min-width: 0;
+  flex: 1;
+}
+
+.activity-text {
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.activity-time {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+/* ---------------- roles matrix (SPEC §19) ---------------- */
+
+.roles-wrap {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.roles-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  min-width: 420px;
+}
+
+.roles-table th,
+.roles-table td {
+  border: 1px solid var(--border);
+  padding: 7px 8px;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.roles-table th {
+  background: var(--panel-2);
+  color: var(--muted);
+  font-weight: 600;
+  font-size: 11px;
+}
+
+.roles-table td.act,
+.roles-table th.act {
+  text-align: left;
+  white-space: normal;
+  min-width: 150px;
+  color: var(--text);
+}
+
+.roles-table .col-hl {
+  background: rgba(124, 108, 246, 0.1);
+  color: var(--text);
+  font-weight: 600;
+}
+
+.panel-close {
+  flex: none;
+  margin-left: 2px;
+}
+
 /* ---------------- responsive ---------------- */
 
-@media (max-width: 960px) {
+/* Right panel becomes an overlay before the chat gets squeezed. */
+@media (max-width: 1100px) {
   .app.with-panel {
     grid-template-columns: 264px minmax(0, 1fr);
   }
@@ -1792,13 +2336,43 @@ a:hover {
     top: 0;
     right: 0;
     bottom: 0;
-    width: min(340px, 100vw);
+    width: min(360px, 100vw);
     z-index: 120;
     box-shadow: var(--shadow-modal);
+    animation: panel-in 0.18s ease;
+  }
+
+  @keyframes panel-in {
+    from {
+      transform: translateX(16px);
+      opacity: 0;
+    }
+    to {
+      transform: none;
+      opacity: 1;
+    }
+  }
+
+  .panel-head {
+    height: auto;
+    min-height: 56px;
+    flex-wrap: wrap;
+    padding: 8px 10px;
+    row-gap: 6px;
+  }
+
+  .panel-tab {
+    flex: 0 1 auto;
   }
 }
 
-@media (max-width: 760px) {
+@media (max-width: 960px) {
+  .catalog-grid {
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  }
+}
+
+@media (max-width: 767px) {
   .app,
   .app.with-panel {
     grid-template-columns: minmax(0, 1fr);
@@ -1817,7 +2391,7 @@ a:hover {
     top: 0;
     left: 0;
     bottom: 0;
-    width: min(290px, 86vw);
+    width: min(300px, 86vw);
     z-index: 130;
     transform: translateX(-102%);
     transition: transform 0.2s ease;
@@ -1836,8 +2410,31 @@ a:hover {
     z-index: 125;
   }
 
+  /* the panel takes over the whole screen on mobile */
+  .right-panel {
+    width: 100vw;
+    border-left: none;
+  }
+
   .screen {
     padding: 16px 14px;
+  }
+
+  .screen-head {
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  .screen-title {
+    font-size: 16.5px;
+  }
+
+  .catalog-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .list-column {
+    max-width: none;
   }
 
   .bubble {
@@ -1845,7 +2442,62 @@ a:hover {
   }
 
   .msg-row .body {
-    max-width: 84%;
+    max-width: 86%;
+  }
+
+  /* iOS: 16px inputs avoid auto-zoom on focus */
+  .input,
+  .textarea,
+  .select,
+  .composer textarea {
+    font-size: 16px;
+  }
+
+  /* comfortable tap targets */
+  .btn,
+  .btn-sm {
+    min-height: 44px;
+  }
+
+  .icon-btn {
+    width: 44px;
+    height: 44px;
+  }
+
+  .side-item,
+  .profile-btn,
+  .dropdown-item,
+  .search-result {
+    min-height: 44px;
+  }
+
+  .members-toggle {
+    min-height: 44px;
+    padding: 0 12px;
+  }
+
+  .msg-actions {
+    display: flex;
+  }
+
+  .composer {
+    padding: 10px 12px calc(14px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .typing-row {
+    padding: 0 16px;
+  }
+
+  .modal-overlay {
+    padding: 12px;
+    align-items: flex-end;
+  }
+
+  .modal {
+    padding: 18px;
+    max-width: 100%;
+    width: min(100%, 92vw);
+    max-height: calc(100dvh - 24px);
   }
 
   .pip {
@@ -1854,7 +2506,696 @@ a:hover {
     bottom: 12px;
   }
 
-  .modal {
-    padding: 18px;
+  .call-card {
+    left: 12px;
+    right: 12px;
+    width: auto;
+    top: calc(12px + env(safe-area-inset-top, 0px));
+  }
+
+  .roles-table {
+    min-width: 380px;
+  }
+
+  .sig-saved-preview {
+    width: 100%;
+  }
+}
+
+@media (max-width: 420px) {
+  .call-controls {
+    gap: 14px;
+  }
+
+  .sign-row {
+    flex-direction: column;
+    gap: 12px;
+  }
+}
+
+
+/* ================= SPEC v4: кошелёк, финансы, панель создателя ================= */
+
+/* ---------- utility ---------- */
+
+.grow {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ---------- кошелёк ---------- */
+
+.wallet-card {
+  background: linear-gradient(150deg, rgba(124, 108, 246, 0.16), rgba(23, 23, 28, 0.9));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 18px;
+}
+
+.wallet-label {
+  font-size: 12px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.wallet-balance {
+  font-size: 34px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  margin-top: 6px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.wallet-balance.small {
+  font-size: 22px;
+}
+
+.wallet-balance.compact {
+  font-size: 20px;
+  margin-top: 2px;
+}
+
+.wallet-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.wallet-balance.inf {
+  color: var(--gold);
+}
+
+/* ---------- карточка владельца (SPEC v5 §30) ---------- */
+
+.owner-card {
+  margin-top: 6px;
+  background: linear-gradient(135deg, #2a2140 0%, #17171c 100%);
+  border: 1px solid var(--gold);
+  border-radius: var(--radius-lg);
+  padding: 18px;
+  box-shadow: var(--shadow-modal);
+}
+
+.owner-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.owner-card-tag {
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.22em;
+  color: var(--gold);
+}
+
+.owner-card-chip {
+  width: 34px;
+  height: 24px;
+  border-radius: 5px;
+  background: linear-gradient(135deg, rgba(245, 190, 65, 0.85), rgba(245, 190, 65, 0.35));
+  border: 1px solid var(--gold-line);
+}
+
+.owner-card-name {
+  margin-top: 28px;
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.owner-card-handle {
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.owner-card-foot {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 16px;
+}
+
+.owner-card-balance {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--gold);
+}
+
+.owner-card-serial {
+  font-size: 12.5px;
+  letter-spacing: 0.14em;
+  font-variant-numeric: tabular-nums;
+  color: rgba(236, 236, 239, 0.72);
+}
+
+/* золотая пилюля «Владелец» (SPEC v5 §29.4) */
+.owner-badge {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  font-size: 10.5px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--gold-soft);
+  color: var(--gold);
+  border: 1px solid var(--gold-line);
+  white-space: nowrap;
+  letter-spacing: 0.02em;
+  margin-left: 6px;
+}
+
+.owner-hint {
+  margin-top: 6px;
+  font-size: 12.5px;
+  color: var(--gold);
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.chip {
+  height: 32px;
+  padding: 0 14px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+  transition: background var(--transition), color var(--transition),
+    border-color var(--transition);
+}
+
+.chip:hover {
+  color: var(--text);
+}
+
+.chip.active {
+  background: rgba(124, 108, 246, 0.16);
+  border-color: rgba(124, 108, 246, 0.5);
+  color: var(--accent);
+}
+
+.card-input {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.08em;
+}
+
+.input-with-icon {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding-left: 11px;
+  color: var(--muted);
+  transition: border-color var(--transition), box-shadow var(--transition);
+  min-width: 0;
+}
+
+.input-with-icon:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(124, 108, 246, 0.15);
+}
+
+.input-with-icon .input {
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  padding-left: 0;
+}
+
+.input-with-icon .input:focus {
+  box-shadow: none;
+}
+
+.input-clear {
+  width: 30px;
+  height: 30px;
+  flex: none;
+  margin-right: 4px;
+}
+
+.summary-box {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  margin-top: 14px;
+}
+
+/* ---------- строки операций ---------- */
+
+.pay-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  padding: 11px 10px;
+  margin: 0 -10px;
+  border-radius: var(--radius-sm);
+  border-bottom: 1px solid var(--border);
+}
+
+.pay-row:last-child {
+  border-bottom: none;
+}
+
+.pay-icon {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+
+.pay-icon.in {
+  color: var(--ok);
+  border-color: rgba(62, 207, 142, 0.35);
+  background: rgba(62, 207, 142, 0.1);
+}
+
+.pay-icon.out {
+  color: var(--danger);
+  border-color: rgba(240, 80, 110, 0.32);
+  background: rgba(240, 80, 110, 0.1);
+}
+
+.pay-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.pay-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.pay-sub {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+}
+
+.pay-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.pay-mask {
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 7px;
+}
+
+.pay-right {
+  flex: none;
+  text-align: right;
+  padding-top: 2px;
+}
+
+.pay-amount {
+  font-size: 14px;
+  font-weight: 700;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.pay-amount.in {
+  color: var(--ok);
+}
+
+.pay-amount.out {
+  color: var(--text);
+}
+
+/* ---------- профиль: кошелёк / панель ---------- */
+
+.profile-wallet-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+/* ---------- сайдбар ---------- */
+
+.balance-badge {
+  background: rgba(124, 108, 246, 0.16);
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+  max-width: 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.balance-badge.inf {
+  background: var(--gold-soft);
+  color: var(--gold);
+}
+
+.side-admin {
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+  margin-top: 4px;
+}
+
+.side-item.accent-item {
+  color: var(--accent);
+}
+
+.side-item.accent-item:hover {
+  background: rgba(124, 108, 246, 0.1);
+}
+
+/* ---------- панель: 6 вкладок без наложения ---------- */
+
+.panel-head {
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.panel-head::-webkit-scrollbar {
+  display: none;
+}
+
+.panel-tab {
+  flex: 1 0 auto;
+  white-space: nowrap;
+  padding: 0 9px;
+}
+
+.panel-close {
+  position: sticky;
+  right: 0;
+  background: var(--panel);
+}
+
+/* ---------- панель создателя ---------- */
+
+.admin-tabs {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 8px;
+  margin-bottom: 4px;
+}
+
+.admin-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.admin-tab {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 13px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  transition: background var(--transition), color var(--transition),
+    border-color var(--transition);
+}
+
+.admin-tab:hover {
+  color: var(--text);
+}
+
+.admin-tab.active {
+  background: rgba(124, 108, 246, 0.16);
+  border-color: rgba(124, 108, 246, 0.5);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.admin-body {
+  gap: 10px;
+}
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 10px;
+}
+
+.stat-card {
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 13px 14px;
+}
+
+.stat-value {
+  font-size: 23px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.stat-value.money {
+  color: var(--accent);
+}
+
+.stat-label {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.filter-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+
+.filter-row .select {
+  width: auto;
+  flex: 0 0 auto;
+  min-width: 160px;
+}
+
+.audit-row,
+.login-row,
+.user-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  padding: 11px 10px;
+  margin: 0 -10px;
+  border-radius: var(--radius-sm);
+  border-bottom: 1px solid var(--border);
+}
+
+.audit-row:last-child,
+.login-row:last-child,
+.user-row:last-child {
+  border-bottom: none;
+}
+
+.audit-row.fresh {
+  animation: audit-in 0.45s ease;
+  background: rgba(124, 108, 246, 0.09);
+}
+
+@keyframes audit-in {
+  from {
+    background: rgba(124, 108, 246, 0.32);
+    transform: translateY(-6px);
+  }
+  to {
+    background: rgba(124, 108, 246, 0.09);
+    transform: none;
+  }
+}
+
+.action-badge {
+  flex: none;
+  align-self: flex-start;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 4px 9px;
+  border-radius: 999px;
+  background: rgba(124, 108, 246, 0.14);
+  border: 1px solid rgba(124, 108, 246, 0.4);
+  color: var(--accent);
+  white-space: nowrap;
+  max-width: 44%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.audit-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.audit-details {
+  font-size: 13.5px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.audit-meta {
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.login-row .status-badge,
+.user-row .status-badge {
+  margin-left: auto;
+  align-self: center;
+}
+
+.user-badge {
+  margin-left: 6px;
+}
+
+/* ---------- бот ---------- */
+
+.bot-checks {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.bot-check {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 9px 11px;
+  font-size: 13.5px;
+  cursor: pointer;
+  transition: border-color var(--transition), background var(--transition);
+}
+
+.bot-check:hover {
+  border-color: rgba(124, 108, 246, 0.4);
+}
+
+.bot-check input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+  flex: none;
+}
+
+.bot-event-code {
+  font-size: 11px;
+  color: var(--muted);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 45%;
+}
+
+.bot-preview {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--accent);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  padding: 10px 12px;
+  font-size: 13px;
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- мобильная адаптация v4 ---------- */
+
+@media (max-width: 767px) {
+  .wallet-balance {
+    font-size: 30px;
+  }
+
+  .wallet-actions .btn {
+    flex: 1;
+  }
+
+  .chip {
+    height: 44px;
+    padding: 0 16px;
+  }
+
+  .stats-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .stat-value {
+    font-size: 19px;
+  }
+
+  .admin-tab {
+    height: 40px;
+  }
+
+  .filter-row .select {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .action-badge {
+    max-width: 38%;
+  }
+
+  .bot-event-code {
+    display: none;
+  }
+
+  .audit-row,
+  .login-row,
+  .user-row,
+  .pay-row {
+    flex-wrap: wrap;
+  }
+
+  .pay-right {
+    margin-left: auto;
   }
 }

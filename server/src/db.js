@@ -180,6 +180,9 @@ ensureColumn('users', 'last_login_at', 'INTEGER')
 ensureColumn('users', 'balance', 'INTEGER DEFAULT 0') // personal wallet, integer rubles
 ensureColumn('orgs', 'balance', 'INTEGER DEFAULT 0') // org treasury, integer rubles
 
+// ---- SPEC v5 §29: owner card ----
+ensureColumn('users', 'is_owner', 'INTEGER DEFAULT 0') // card owner: infinite money, forced owner role
+
 /** Run fn inside a single SQLite transaction (all balance mutations, SPEC v4 §24). */
 export function transaction(fn) {
   return db.transaction(fn)()

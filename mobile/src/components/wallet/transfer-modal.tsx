@@ -2,12 +2,11 @@ import { Feather } from '@expo/vector-icons';
 import { useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { Avatar } from '@/components/avatar';
+import { Avatar, OwnerBadge } from '@/components/avatar';
 import { Button, Field } from '@/components/controls';
 import { AppModal } from '@/components/modal';
-import { DemoBanner } from '@/components/wallet/demo-banner';
 import { usersApi, walletApi } from '@/lib/endpoints';
-import { rub } from '@/lib/format';
+import { formatBalance, rub } from '@/lib/format';
 import { colors, radius } from '@/lib/theme';
 import { User } from '@/lib/types';
 
@@ -15,8 +14,8 @@ const SEARCH_DEBOUNCE_MS = 300;
 
 interface Props {
   visible: boolean;
-  /** Текущий баланс — для итога «после перевода». */
-  balance: number;
+  /** Текущий баланс — для итога «после перевода» (null — баланс не ограничен, SPEC v5 §29). */
+  balance: number | null;
   /** Мой id — не показывать себя в поиске получателей. */
   meId: string;
   onClose(): void;
@@ -66,8 +65,10 @@ export function TransferModal({ visible, balance, meId, onClose, onDone }: Props
   }, [query, visible, selected, meId]);
 
   const amountValue = parseInt(amount.replace(/\D/g, ''), 10) || 0;
-  const after = balance - amountValue;
-  const insufficient = amountValue > 0 && after < 0;
+  // balance === null → владелец, проверка средств не нужна (SPEC v5 §29).
+  const unlimited = balance === null;
+  const after = unlimited ? null : balance - amountValue;
+  const insufficient = !unlimited && amountValue > 0 && after !== null && after < 0;
 
   // Сброс полей при закрытии: состояние живёт, только пока модалка открыта.
   const reset = () => {
@@ -115,7 +116,7 @@ export function TransferModal({ visible, balance, meId, onClose, onDone }: Props
     }
     Alert.alert(
       'Перевести',
-      `Перевести ${rub(amountValue)} пользователю ${selected.displayName}? Демо-режим: реальные деньги не участвуют`,
+      `Перевести ${rub(amountValue)} пользователю ${selected.displayName}?`,
       [
         { text: 'Отмена', style: 'cancel' },
         { text: 'Перевести', onPress: () => void doTransfer(selected, amountValue) },
@@ -135,8 +136,6 @@ export function TransferModal({ visible, balance, meId, onClose, onDone }: Props
           onPress={submit}
         />
       }>
-      <DemoBanner text="Демо-режим: переводы имитируются, реальные деньги не участвуют" />
-
       {selected ? (
         <View style={styles.selectedRow}>
           <Avatar name={selected.displayName} color={selected.avatarColor} size={36} />
@@ -148,6 +147,7 @@ export function TransferModal({ visible, balance, meId, onClose, onDone }: Props
               @{selected.username}
             </Text>
           </View>
+          {selected.isOwner ? <OwnerBadge compact /> : null}
           <Pressable onPress={() => setSelected(null)} hitSlop={8}>
             <Feather name="x" size={18} color={colors.muted} />
           </Pressable>
@@ -191,6 +191,7 @@ export function TransferModal({ visible, balance, meId, onClose, onDone }: Props
                   @{u.username}
                 </Text>
               </View>
+              {u.isOwner ? <OwnerBadge compact /> : null}
               <Feather name="chevron-right" size={16} color={colors.muted} />
             </Pressable>
           ))}
@@ -216,7 +217,7 @@ export function TransferModal({ visible, balance, meId, onClose, onDone }: Props
       <View style={styles.total}>
         <Text style={styles.totalRow}>
           <Text style={styles.totalLabel}>Баланс: </Text>
-          {rub(balance)}
+          {formatBalance(balance)}
         </Text>
         <Text style={styles.totalRow}>
           <Text style={styles.totalLabel}>К переводу: </Text>
@@ -224,7 +225,7 @@ export function TransferModal({ visible, balance, meId, onClose, onDone }: Props
         </Text>
         <Text style={[styles.totalRow, insufficient && { color: colors.danger }]}>
           <Text style={styles.totalLabel}>После перевода: </Text>
-          {insufficient ? 'Недостаточно средств' : rub(Math.max(after, 0))}
+          {insufficient ? 'Недостаточно средств' : unlimited ? '∞' : rub(Math.max(after ?? 0, 0))}
         </Text>
       </View>
     </AppModal>

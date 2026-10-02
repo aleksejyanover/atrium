@@ -2,11 +2,13 @@ import { useState } from 'react';
 import { api } from '../api';
 import { useApp } from '../store';
 import { Modal } from './Modal';
+import { Toggle } from './Toggle';
 
 export function CreateOrgModal({ onClose }: { onClose: () => void }) {
   const { refreshOrgs, selectOrg, toast } = useApp();
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
+  const [isPublic, setIsPublic] = useState(true); // default ON (SPEC v2 §14.5)
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -19,7 +21,7 @@ export function CreateOrgModal({ onClose }: { onClose: () => void }) {
     setBusy(true);
     setError(null);
     try {
-      const { org } = await api.createOrg(trimmed, description.trim() || undefined);
+      const { org } = await api.createOrg(trimmed, description.trim() || undefined, isPublic);
       await refreshOrgs();
       selectOrg(org.id);
       toast(`Организация «${org.name}» создана`, 'success');
@@ -76,6 +78,11 @@ export function CreateOrgModal({ onClose }: { onClose: () => void }) {
           maxLength={400}
         />
       </div>
+      <Toggle
+        checked={isPublic}
+        onChange={setIsPublic}
+        label="Публичная организация (видна в каталоге)"
+      />
     </Modal>
   );
 }

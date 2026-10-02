@@ -9,6 +9,8 @@ import { io } from 'socket.io-client'
 
 const BASE = process.env.BASE_URL || `http://localhost:${process.env.PORT || 4000}`
 const RUN_ID = Date.now().toString(36)
+// SPEC v5 §29: owner code — same fallback as the server (ATRIUM_OWNER_CODE env)
+const OWNER_CODE = process.env.ATRIUM_OWNER_CODE || 'OWNER-ATRIUM-777'
 
 let passed = 0
 let failed = 0
@@ -494,7 +496,8 @@ async function main() {
   })
 
   await check('user search works', async () => {
-    const { status, data } = await api('GET', `/api/users/search?q=bob_`, { token: u1.token })
+    // полный уникальный ник: старых bob_* из прошлых прогонов уже больше 15 (топ-15 по алфавиту)
+    const { status, data } = await api('GET', `/api/users/search?q=bob_${RUN_ID}`, { token: u1.token })
     assert(status === 200, `status ${status}`)
     assert(data.users.some((u) => u.username === `bob_${RUN_ID}`), 'user2 not found in search')
   })
@@ -1954,6 +1957,231 @@ async function main() {
     assert(stats.status === 200, `stats ${stats.status}`)
     assert(stats.data.paidTotal >= 1500, `paidTotal: ${stats.data.paidTotal}`)
     assert(stats.data.totalBalance >= 8000, `totalBalance: ${stats.data.totalBalance}`)
+  })
+
+  // ============================================================
+  // SPEC v5 (§29/§31) — Smoke v5: owner card (is_owner)
+  // Server must run with the default ATRIUM_OWNER_CODE (or the same env
+  // value as this script reads) for the claim checks below.
+  // ============================================================
+
+  // ---------- claim (§29) ----------
+  const own = await check('§29: register owner candidate (fresh, balance 0)', async () => {
+    const { status, data } = await api('POST', '/api/auth/register', {
+      body: {
+        username: `own_${RUN_ID}`,
+        displayName: 'Владелец Тестов',
+        email: `own_${RUN_ID}@test.local`,
+        password: 'secret123',
+      },
+    })
+    assert(status === 201, `status ${status}`)
+    assert(data.user?.isOwner === false, 'fresh user must not be an owner')
+    assert(typeof data.user?.balance === 'number' && data.user.balance === 0,
+      `fresh balance: ${data.user?.balance}`)
+    return data
+  })
+
+  await check('§29: claim with wrong code -> 400 «Неверный код»', async () => {
+    const { status, data } = await api('POST', '/api/owner/claim', {
+      token: own.token, body: { code: 'not-the-owner-code' },
+    })
+    assert(status === 400, `status ${status}`)
+    assert(data?.error === 'Неверный код', `error: ${data?.error}`)
+    const me = await api('GET', '/api/me', { token: own.token })
+    assert(me.data.user?.isOwner === false, 'wrong code must not activate the owner card')
+    assert(typeof me.data.balance === 'number', 'balance must stay numeric after failed claim')
+  })
+
+  await check('§29: claim with correct code (trim + case-insensitive) -> 200 isOwner; repeat -> already', async () => {
+    const { status, data } = await api('POST', '/api/owner/claim', {
+      token: own.token, body: { code: `  ${OWNER_CODE.toLowerCase()}  ` },
+    })
+    assert(status === 200, `status ${status}: ${JSON.stringify(data)}`)
+    assert(data?.ok === true && data?.isOwner === true, `body: ${JSON.stringify(data)}`)
+    assert(!('already' in data), 'first claim must not be marked as already')
+
+    const again = await api('POST', '/api/owner/claim', {
+      token: own.token, body: { code: OWNER_CODE },
+    })
+    assert(again.status === 200, `repeat status ${again.status}`)
+    assert(again.data?.ok === true && again.data?.already === true && again.data?.isOwner === true,
+      `repeat body: ${JSON.stringify(again.data)}`)
+  })
+
+  await check('§29: GET /api/me -> isOwner true + balance null (∞), others unchanged', async () => {
+    const { status, data } = await api('GET', '/api/me', { token: own.token })
+    assert(status === 200, `status ${status}`)
+    assert(data.user?.isOwner === true, `user.isOwner: ${data.user?.isOwner}`)
+    assert(data.isOwner === true, `top-level isOwner: ${data.isOwner}`)
+    assert(data.balance === null, `top-level balance: ${data.balance}`)
+    assert(data.user.balance === null, `user.balance: ${data.user.balance}`)
+
+    const other = await api('GET', '/api/me', { token: u2.token })
+    assert(other.data.user?.isOwner === false, 'regular user must have isOwner=false')
+    assert(other.data.isOwner === false, 'top-level isOwner must be false for regular user')
+    assert(typeof other.data.balance === 'number', 'regular balance must stay numeric')
+  })
+
+  // ---------- infinite money (§29.1) ----------
+  await check('§29: owner transfer at balance 0 -> 200, payment recorded, balance not decremented', async () => {
+    const before = await api('GET', '/api/wallet', { token: own.token })
+    assert(before.status === 200 && before.data.balance === null, `wallet balance: ${before.data.balance}`)
+    assert(before.data.payments.length === 0, 'fresh owner must have empty history')
+
+    const { status, data } = await api('POST', '/api/wallet/transfer', {
+      token: own.token, body: { toUserId: u2.user.id, amount: 500, note: 'Перевод владельца' },
+    })
+    assert(status === 200, `status ${status}: ${JSON.stringify(data)}`)
+    assert(data.payment?.kind === 'transfer', `kind: ${data.payment?.kind}`)
+    assert(data.payment?.amount === 500, `amount: ${data.payment?.amount}`)
+    assert(data.payment?.fromUserId === own.user.id && data.payment?.toUserId === u2.user.id, 'payment parties wrong')
+    assert(data.balance === null, `response balance: ${data.balance}`)
+
+    const w = await api('GET', '/api/wallet', { token: own.token })
+    assert(w.data.balance === null, `wallet balance: ${w.data.balance}`)
+    const hist = w.data.payments.find((p) => p.id === data.payment.id)
+    assert(hist && hist.amount === 500 && hist.direction === 'out', 'owner history must keep the payment')
+
+    // the real column is untouched (admin panel reads it directly)
+    const admUsers = await api('GET', `/api/admin/users?query=own_${RUN_ID}`, { token: adm.token })
+    assert(admUsers.status === 200, `admin users ${admUsers.status}`)
+    const row = admUsers.data.items.find((u) => u.username === `own_${RUN_ID}`)
+    assert(row, 'owner missing from admin users')
+    assert(row.isOwner === true, `admin users isOwner: ${row.isOwner}`)
+    assert(row.balance === 0, `owner column balance changed: ${row.balance}`)
+
+    // the recipient really got the money
+    const w2 = await api('GET', '/api/wallet', { token: u2.token })
+    assert(w2.data.balance === 5000, `recipient balance: ${w2.data.balance} (4500 + 500)`)
+    assert(w2.data.payments.some((p) => p.id === data.payment.id), 'recipient does not see the transfer')
+  })
+
+  // ---------- forced owner on join (§29.2) ----------
+  let ownerInviteId = null
+  await check('§29: invite the card owner with role «member» -> 201', async () => {
+    const { status, data } = await api('POST', `/api/orgs/${orgId}/invite`, {
+      token: u1.token, body: { usernameOrEmail: `own_${RUN_ID}`, role: 'member' },
+    })
+    assert(status === 201, `status ${status}: ${JSON.stringify(data)}`)
+    assert(data.invite?.role === 'member', `invite role: ${data.invite?.role}`)
+    assert(data.invite?.invitee?.user?.isOwner === true, 'invite DTO must carry invitee isOwner')
+    ownerInviteId = data.invite.id
+  })
+
+  await check('§29: accept invite -> forced role owner (two owners in one org)', async () => {
+    const { status, data } = await api('POST', `/api/invites/${ownerInviteId}/accept`, {
+      token: own.token, body: { signatureDataUrl: FAKE_PNG, signedName: 'Владелец Тестов' },
+    })
+    assert(status === 200, `status ${status}: ${JSON.stringify(data)}`)
+    assert(data.role === 'owner', `role: ${data.role} (must be forced to owner)`)
+
+    const org = await api('GET', `/api/orgs/${orgId}`, { token: u1.token })
+    assert(org.status === 200, `org fetch ${org.status}`)
+    const owners = org.data.members.filter((m) => m.role === 'owner')
+    assert(owners.length === 2, `owners in org: ${owners.length} (expected 2)`)
+    assert(owners.some((m) => m.user.id === u1.user.id), 'the original owner must stay owner')
+    const mine = owners.find((m) => m.user.id === own.user.id)
+    assert(mine, 'card owner is not an owner of the org')
+    assert(mine.user.isOwner === true, `member DTO isOwner: ${mine.user.isOwner}`)
+
+    // the second owner has full rank-based rights (rank 100)
+    const edit = await api('PATCH', `/api/orgs/${orgId}`, { token: own.token, body: { description: 'Второй владелец' } })
+    assert(edit.status === 200, `second owner PATCH org: ${edit.status}`)
+    const invites = await api('GET', `/api/orgs/${orgId}/invites`, { token: own.token })
+    assert(invites.status === 200, `second owner views invites: ${invites.status}`)
+  })
+
+  await check('§29: owner treasury deposit without funds -> 200 (check skipped), org credited', async () => {
+    const { status, data } = await api('POST', `/api/orgs/${orgId}/treasury/deposit`, {
+      token: own.token, body: { amount: 1000 },
+    })
+    assert(status === 200, `status ${status}: ${JSON.stringify(data)}`)
+    assert(data.orgBalance === 1500, `org balance: ${data.orgBalance} (500 + 1000)`)
+    assert(data.userBalance === null, `owner userBalance: ${data.userBalance}`)
+    const admUsers = await api('GET', `/api/admin/users?query=own_${RUN_ID}`, { token: adm.token })
+    const row = admUsers.data.items.find((u) => u.username === `own_${RUN_ID}`)
+    assert(row.balance === 0, `owner column balance after deposit: ${row.balance}`)
+    const w = await api('GET', '/api/wallet', { token: own.token })
+    assert(w.data.balance === null, `wallet balance: ${w.data.balance}`)
+    assert(w.data.payments.some((p) => p.kind === 'treasury_deposit' && p.amount === 1000),
+      'deposit payment missing from owner history')
+  })
+
+  await check('§29: application accept -> card owner becomes owner (forced role)', async () => {
+    const appOwner = await api('POST', '/api/auth/register', {
+      body: {
+        username: `appown_${RUN_ID}`,
+        displayName: 'Владелец Заявитель',
+        email: `appown_${RUN_ID}@test.local`,
+        password: 'secret123',
+      },
+    })
+    assert(appOwner.status === 201, `register ${appOwner.status}`)
+
+    const claim = await api('POST', '/api/owner/claim', {
+      token: appOwner.data.token, body: { code: OWNER_CODE },
+    })
+    assert(claim.status === 200 && claim.data?.isOwner === true, `claim: ${JSON.stringify(claim.data)}`)
+
+    const app = await api('POST', `/api/orgs/${privateOrgId}/applications`, {
+      token: appOwner.data.token,
+      body: { signatureDataUrl: FAKE_PNG, signedName: 'Владелец Заявитель' },
+    })
+    assert(app.status === 201, `application ${app.status}: ${JSON.stringify(app.data)}`)
+
+    const accept = await api('POST', `/api/applications/${app.data.application.id}/accept`, { token: u1.token })
+    assert(accept.status === 200, `accept ${accept.status}: ${JSON.stringify(accept.data)}`)
+
+    const org = await api('GET', `/api/orgs/${privateOrgId}`, { token: appOwner.data.token })
+    assert(org.status === 200, `org fetch ${org.status}`)
+    assert(org.data.role === 'owner', `role via application: ${org.data.role} (must be forced to owner)`)
+    const owners = org.data.members.filter((m) => m.role === 'owner')
+    assert(owners.length === 2, `owners in private org: ${owners.length} (expected 2)`)
+  })
+
+  // ---------- ban protection (§29.3) ----------
+  await check('§29: ban card owner -> 409 «Владельца нельзя заблокировать»', async () => {
+    const { status, data } = await api('POST', `/api/admin/users/${own.user.id}/ban`, { token: adm.token })
+    assert(status === 409, `status ${status}`)
+    assert(data?.error === 'Владельца нельзя заблокировать', `error: ${data?.error}`)
+    const me = await api('GET', '/api/me', { token: own.token })
+    assert(me.status === 200, `owner got banned anyway: ${me.status} ${JSON.stringify(me.data)}`)
+    assert(me.data.user?.isOwner === true, 'owner flag lost after failed ban')
+  })
+
+  // ---------- isOwner in people search (§29/§29.4) ----------
+  await check('§29: GET /api/users/search -> isOwner flag present', async () => {
+    const hit = await api('GET', `/api/users/search?q=own_${RUN_ID}`, { token: u2.token })
+    assert(hit.status === 200, `status ${hit.status}`)
+    const cardOwner = hit.data.users.find((u) => u.username === `own_${RUN_ID}`)
+    assert(cardOwner, 'card owner not found by search')
+    assert(cardOwner.isOwner === true, `search isOwner: ${cardOwner.isOwner}`)
+
+    const plain = await api('GET', `/api/users/search?q=alice_${RUN_ID}`, { token: u2.token })
+    assert(plain.status === 200, `status ${plain.status}`)
+    const alice = plain.data.users.find((u) => u.username === `alice_${RUN_ID}`)
+    assert(alice && alice.isOwner === false, `plain user isOwner: ${alice?.isOwner}`)
+  })
+
+  // ---------- audit + bot report (§29) ----------
+  await check('§29: audit action owner.claim + bot report «👑 Карточка владельца активирована»', async () => {
+    const a = await api('GET', '/api/admin/audit?action=owner.claim&limit=10', { token: adm.token })
+    assert(a.status === 200, `status ${a.status}`)
+    assert(a.data.items.length >= 1, 'no owner.claim rows in audit journal')
+    assert(a.data.items.some((i) => i.actor?.username === `own_${RUN_ID}`), 'owner.claim actor missing')
+    assert(a.data.items.every((i) => (i.details || '').includes('Карточка владельца')),
+      `details: ${a.data.items.map((i) => i.details).join(' | ')}`)
+
+    const dmsRes = await api('GET', '/api/dms', { token: adm.token })
+    assert(dmsRes.status === 200, `dms ${dmsRes.status}`)
+    const dm = dmsRes.data.dms.find((d) => d.peer?.username === 'atrium_bot')
+    assert(dm, 'bot DM not listed')
+    const msgs = await api('GET', `/api/channels/${dm.channel.id}/messages?limit=50`, { token: adm.token })
+    assert(msgs.status === 200, `messages ${msgs.status}`)
+    const botMsgs = msgs.data.messages.filter((m) => m.sender?.username === 'atrium_bot')
+    assert(botMsgs.some((m) => m.text.includes('👑 Карточка владельца активирована')),
+      `no owner claim report among: ${botMsgs.map((m) => m.text).join(' | ')}`)
   })
 }
 
