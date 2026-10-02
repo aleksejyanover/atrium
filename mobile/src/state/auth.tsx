@@ -20,6 +20,10 @@ interface AuthContextValue {
     password: string;
   }): Promise<void>;
   logout(): Promise<void>;
+  /** Локально применить обновлённого пользователя (PATCH /api/me). */
+  updateMe(user: User): void;
+  /** Перечитать профиль с сервера. */
+  refreshMe(): Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -109,9 +113,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     [],
   );
 
+  const updateMe = useCallback((next: User) => {
+    setUser(next);
+  }, []);
+
+  const refreshMe = useCallback(async () => {
+    try {
+      const { user: me } = await authApi.me();
+      setUser(me);
+    } catch {
+      // сеть недоступна — оставляем текущий профиль
+    }
+  }, []);
+
   const value = useMemo(
-    () => ({ token, user, ready, login, register, logout }),
-    [token, user, ready, login, register, logout],
+    () => ({ token, user, ready, login, register, logout, updateMe, refreshMe }),
+    [token, user, ready, login, register, logout, updateMe, refreshMe],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

@@ -12,6 +12,11 @@ import {
   orgChannels,
   countOrgMembers,
   countOrgChannels,
+  channelUnread,
+  orgUnread,
+  pendingDismissalUserIds,
+  countPendingApplications,
+  removeMemberFromOrg,
 } from '../db.js'
 import { requireAuth, requireOrgMember, requireRank, findOrgSafe } from '../auth.js'
 import {
@@ -19,6 +24,7 @@ import {
   publicUser,
   publicOrg,
   publicChannel,
+  signedFields,
   bad,
   conflict,
   forbidden,
@@ -30,6 +36,8 @@ import {
 import { canChangeRole, canRemoveMember, canInvite } from '../permissions.js'
 import { buildContractText } from '../contract.js'
 import { emitToOrg, emitToUser } from '../bus.js'
+import { logActivity, phrases, activityDto } from '../activity.js'
+import { logAudit } from '../audit.js'
 
 const router = Router()
 // auth only for /api/orgs/* paths (keeps unknown /api routes returning 404)
@@ -64,12 +72,13 @@ function inviteDto(inviteRow) {
     status: inviteRow.status,
     createdAt: inviteRow.created_at,
     contractText: inviteRow.contract_text,
+    ...signedFields(inviteRow),
   }
 }
 
 // ---------- Organizations ----------
 
-// POST /api/orgs {name, description?} -> 201 {org, role:"owner"}
+// POST /api/orgs {name, description?, isPublic?} -> 201 {org, role:"owner"}
 router.post('/orgs', (req, res, next) => {
   try {
     const body = req.body || {}
@@ -77,13 +86,14 @@ router.post('/orgs', (req, res, next) => {
     const description = str(body.description) ?? ''
     if (!name || name.length > 100) throw bad('Название организации обязательно (1–100 символов)')
     if (description.length > 500) throw bad('Описание: не более 500 символов')
+    const isPublic = body.isPublic === undefined ? true : !!body.isPublic
 
     const orgId = newId('o')
     const createdAt = Date.now()
     const generalId = newId('c')
 
-    run('INSERT INTO orgs (id, name, description, created_by, created_at) VALUES (?,?,?,?,?)',
-      orgId, name, description, req.userId, createdAt)
+    run('INSERT INTO orgs (id, name, description, created_by, created_at, is_public) VALUES (?,?,?,?,?,?)',
+      orgId, name, description, req.userId, createdAt, isPublic ? 1 : 0)
     run('INSERT INTO members (org_id, user_id, role, joined_at) VALUES (?,?,?,?)',
       orgId, req.userId, 'owner', createdAt)
     // default channel #general
@@ -92,13 +102,22 @@ router.post('/orgs', (req, res, next) => {
     run('INSERT INTO channel_members (channel_id, user_id) VALUES (?,?)', generalId, req.userId)
 
     const org = publicOrg(findOrg(orgId), 1, 1)
+    // SPEC v4 §23: global audit (org creation has no activity row of its own)
+    logAudit({
+      orgId,
+      actorId: req.userId,
+      action: 'org.create',
+      details: `Создана организация «${name}»`,
+      botText: `🏢 Организация: «${name}» создана`,
+      botSubject: name,
+    })
     res.status(201).json({ org, role: 'owner' })
   } catch (err) {
     next(err)
   }
 })
 
-// GET /api/orgs -> {orgs:[{...org, role, unread:0}]}
+// GET /api/orgs -> {orgs:[{...org, role, unread}]} (unread per SPEC v3 §18)
 router.get('/orgs', (req, res, next) => {
   try {
     const rows = all(
@@ -111,7 +130,7 @@ router.get('/orgs', (req, res, next) => {
     const orgs = rows.map((r) => ({
       ...publicOrg(r, countOrgMembers(r.id), countOrgChannels(r.id)),
       role: r.m_role,
-      unread: 0,
+      unread: orgUnread(r.id, req.userId),
     }))
     res.json({ orgs })
   } catch (err) {
@@ -120,32 +139,65 @@ router.get('/orgs', (req, res, next) => {
 })
 
 // GET /api/orgs/:id -> {org, role, members, channels} (member only)
+// SPEC v2 §12: +pendingApplications (rank>=40, else 0), members[].dismissalPending (rank>=40)
+// SPEC v3 §18: channels[].unread
 router.get('/orgs/:id', requireOrgMember, (req, res, next) => {
   try {
     const org = publicOrg(req.org, countOrgMembers(req.org.id), countOrgChannels(req.org.id))
-    const members = orgMembers(req.org.id).map(memberDto)
+    const staff = req.rank >= 40
+    const dismissals = staff ? new Set(pendingDismissalUserIds(req.org.id)) : new Set()
+    const members = orgMembers(req.org.id).map((row) => {
+      const dto = memberDto(row)
+      if (dismissals.has(row.id)) dto.dismissalPending = true
+      return dto
+    })
     const channels = orgChannels(req.org.id).map((c) => ({
       id: c.id,
       name: c.name,
       createdAt: c.created_at,
+      unread: channelUnread(c.id, req.userId),
     }))
-    res.json({ org, role: req.member.role, members, channels })
+    res.json({
+      org,
+      role: req.member.role,
+      members,
+      channels,
+      pendingApplications: staff ? countPendingApplications(req.org.id) : 0,
+    })
   } catch (err) {
     next(err)
   }
 })
 
-// PATCH /api/orgs/:id {name?, description?} -> {org} (rank >= 60)
+// PATCH /api/orgs/:id {name?, description?, isPublic?} -> {org} (rank >= 60)
 router.patch('/orgs/:id', requireOrgMember, requireRank(60, 'Редактировать организацию может только админ'), (req, res, next) => {
   try {
     const body = req.body || {}
     const name = body.name !== undefined ? str(body.name) : undefined
     const description = body.description !== undefined ? str(body.description) : undefined
+    const isPublic = body.isPublic !== undefined ? !!body.isPublic : undefined
     if (body.name !== undefined && (!name || name.length > 100)) throw bad('Название организации обязательно (1–100 символов)')
     if (description !== undefined && description.length > 500) throw bad('Описание: не более 500 символов')
 
-    if (name !== undefined) run('UPDATE orgs SET name = ? WHERE id = ?', name, req.org.id)
-    if (description !== undefined) run('UPDATE orgs SET description = ? WHERE id = ?', description, req.org.id)
+    const parts = []
+    if (name !== undefined) {
+      run('UPDATE orgs SET name = ? WHERE id = ?', name, req.org.id)
+      parts.push(`название организации на «${name}»`)
+    }
+    if (description !== undefined) {
+      run('UPDATE orgs SET description = ? WHERE id = ?', description, req.org.id)
+      parts.push('описание организации')
+    }
+    if (isPublic !== undefined) {
+      run('UPDATE orgs SET is_public = ? WHERE id = ?', isPublic ? 1 : 0, req.org.id)
+      parts.push(isPublic ? 'организацию сделал публичной' : 'организацию сделал приватной')
+    }
+    if (parts.length) {
+      logActivity(req.org.id, 'org.updated', {
+        actorId: req.userId,
+        details: phrases.orgUpdated(req.userId, parts),
+      })
+    }
 
     const org = publicOrg(findOrg(req.org.id), countOrgMembers(req.org.id), countOrgChannels(req.org.id))
     res.json({ org })
@@ -160,6 +212,11 @@ router.post('/orgs/:id/leave', requireOrgMember, (req, res, next) => {
     if (req.member.role === 'owner') throw conflict('Владелец не может покинуть организацию')
     removeMemberFromOrg(req.org.id, req.userId)
     emitToOrg(req.org.id, 'member:left', { orgId: req.org.id, userId: req.userId })
+    logActivity(req.org.id, 'member.left', {
+      actorId: req.userId,
+      targetUserId: req.userId,
+      details: phrases.memberLeft(req.userId),
+    })
     res.json({ ok: true })
   } catch (err) {
     next(err)
@@ -183,6 +240,11 @@ router.patch('/orgs/:id/members/:userId', requireOrgMember, (req, res, next) => 
 
     run('UPDATE members SET role = ? WHERE org_id = ? AND user_id = ?', newRole, req.org.id, target.user_id)
     emitToOrg(req.org.id, 'role:changed', { orgId: req.org.id, userId: target.user_id, role: newRole })
+    logActivity(req.org.id, 'role.changed', {
+      actorId: req.userId,
+      targetUserId: target.user_id,
+      details: phrases.roleChanged(req.userId, target.user_id, target.role, newRole),
+    })
 
     const row = get(
       `SELECT u.*, m.role AS m_role, m.joined_at AS m_joined_at
@@ -213,30 +275,27 @@ router.delete('/orgs/:id/members/:userId', requireOrgMember, (req, res, next) =>
 
     removeMemberFromOrg(req.org.id, targetId)
     emitToOrg(req.org.id, 'member:left', { orgId: req.org.id, userId: targetId })
+    logActivity(req.org.id, 'member.left', {
+      actorId: req.userId,
+      targetUserId: targetId,
+      details: phrases.memberLeft(targetId),
+    })
     res.json({ ok: true })
   } catch (err) {
     next(err)
   }
 })
 
-/** Delete membership + remove from all channel_members of org's channels. */
-function removeMemberFromOrg(orgId, userId) {
-  run('DELETE FROM members WHERE org_id = ? AND user_id = ?', orgId, userId)
-  run(
-    `DELETE FROM channel_members
-     WHERE user_id = ?
-       AND channel_id IN (SELECT id FROM channels WHERE org_id = ?)`,
-    userId,
-    orgId
-  )
-}
-
 // ---------- Org channels ----------
 
-// GET /api/orgs/:id/channels -> {channels:[...]}
+// GET /api/orgs/:id/channels -> {channels:[...]} (+ unread per SPEC v3 §18)
 router.get('/orgs/:id/channels', requireOrgMember, (req, res, next) => {
   try {
-    res.json({ channels: orgChannels(req.org.id).map(publicChannel) })
+    const channels = orgChannels(req.org.id).map((c) => ({
+      ...publicChannel(c),
+      unread: channelUnread(c.id, req.userId),
+    }))
+    res.json({ channels })
   } catch (err) {
     next(err)
   }
@@ -264,6 +323,10 @@ router.post('/orgs/:id/channels', requireOrgMember, requireRank(40, 'Созда�
 
     const channel = publicChannel(findChannelRow(id))
     emitToOrg(req.org.id, 'channel:created', { orgId: req.org.id, channel })
+    logActivity(req.org.id, 'channel.created', {
+      actorId: req.userId,
+      details: phrases.channelCreated(req.userId, name),
+    })
     res.status(201).json({ channel })
   } catch (err) {
     next(err)
@@ -329,6 +392,11 @@ router.post('/orgs/:id/invite', requireOrgMember, (req, res, next) => {
       org: orgPublic,
       inviter: { ...inviterUser, user: inviterUser },
     })
+    logActivity(req.org.id, 'invite.created', {
+      actorId: req.userId,
+      targetUserId: target.id,
+      details: phrases.inviteCreated(req.userId, target.id),
+    })
 
     res.status(201).json({ invite })
   } catch (err) {
@@ -344,6 +412,49 @@ router.get('/orgs/:id/invites', requireOrgMember, requireRank(40, 'Просмо�
       req.org.id
     )
     res.json({ invites: rows.map(inviteDto) })
+  } catch (err) {
+    next(err)
+  }
+})
+
+// ---------- Activity log (SPEC v3 §18) ----------
+
+// GET /api/orgs/:id/activity?before=<id>&limit=50 -> {activity, hasMore} (any member)
+router.get('/orgs/:id/activity', requireOrgMember, (req, res, next) => {
+  try {
+    let limit = Number.parseInt(req.query.limit, 10)
+    if (!Number.isFinite(limit) || limit < 1) limit = 50
+    if (limit > 100) limit = 100
+    const before = typeof req.query.before === 'string' && req.query.before ? req.query.before : null
+
+    let rows
+    if (before) {
+      const anchor = get('SELECT rowid AS rid, * FROM activity WHERE id = ? AND org_id = ?', before, req.org.id)
+      if (!anchor) throw notFound('Запись истории не найдена')
+      rows = all(
+        `SELECT * FROM activity
+         WHERE org_id = ? AND (created_at < ? OR (created_at = ? AND rowid < ?))
+         ORDER BY created_at DESC, rowid DESC
+         LIMIT ?`,
+        req.org.id, anchor.created_at, anchor.created_at, anchor.rid, limit + 1
+      )
+    } else {
+      rows = all(
+        'SELECT * FROM activity WHERE org_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?',
+        req.org.id, limit + 1
+      )
+    }
+
+    const hasMore = rows.length > limit
+    const page = (hasMore ? rows.slice(0, limit) : rows).reverse()
+    const activity = page.map((row) =>
+      activityDto(
+        row,
+        row.actor_id ? findUserById(row.actor_id) : null,
+        row.target_user_id ? findUserById(row.target_user_id) : null
+      )
+    )
+    res.json({ activity, hasMore })
   } catch (err) {
     next(err)
   }

@@ -13,6 +13,17 @@ export const isValidRole = (role) => Object.prototype.hasOwnProperty.call(ROLES,
 export const rankOf = (role) => (ROLES[role] ? ROLES[role].rank : -1)
 export const roleLabel = (role) => (ROLES[role] ? ROLES[role].label : role)
 
+// ---- Superadmin list (SPEC v4 §23): usernames, NOT roles ----
+export const ADMIN_USERNAMES = (
+  process.env.ATRIUM_ADMIN?.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean)
+) || ['alex']
+
+export const isAdminUsername = (username) =>
+  !!username && ADMIN_USERNAMES.includes(String(username).toLowerCase())
+
+// ---- Money: integer rubles, space thousands (SPEC v4 §24) ----
+export const rub = (n) => String(Math.trunc(Number(n) || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, ' ')
+
 // ---- Ids: prefixes u_ o_ i_ c_ m_ + 12 random hex chars ----
 export function newId(prefix) {
   return `${prefix}_${crypto.randomBytes(6).toString('hex')}`
@@ -44,6 +55,88 @@ export function publicUser(row) {
   }
 }
 
+/** publicUser + own signature fields (SPEC v2.1/v3 §17) — for /api/me responses ONLY. */
+export function meUser(row) {
+  if (!row) return null
+  return {
+    ...publicUser(row),
+    fullName: row.full_name ?? null,
+    signature: row.signature ?? null,
+    signatureKind: row.signature_kind ?? null,
+    signatureText: row.signature_text ?? null,
+    // SPEC v4 §23/§25: computed on the server, never accepted from the client
+    isAdmin: isAdminUsername(row.username),
+    balance: row.balance ?? 0,
+  }
+}
+
+/** User reference usable both flat and nested: {id, ..., user:{id,...}} (house style). */
+export function userRef(row) {
+  const u = publicUser(row)
+  return u ? { ...u, user: u } : { user: null }
+}
+
+/**
+ * Relaxed contract signature (SPEC §17): EITHER signatureDataUrl (data:image/...)
+ * OR signatureText (2..80 chars) is required, otherwise 400 «Добавьте подпись».
+ * Returns { signature, signatureKind:'png'|'text', signatureText }.
+ */
+export function contractSignature(body) {
+  const dataUrl = typeof body?.signatureDataUrl === 'string' ? body.signatureDataUrl.trim() : ''
+  const text = typeof body?.signatureText === 'string' ? body.signatureText.trim() : ''
+  if (dataUrl.startsWith('data:image/')) {
+    return { signature: dataUrl, signatureKind: 'png', signatureText: null }
+  }
+  if (text) {
+    if (text.length < 2 || text.length > 80) throw bad('Текст подписи: 2–80 символов')
+    return { signature: null, signatureKind: 'text', signatureText: text }
+  }
+  throw bad('Добавьте подпись')
+}
+
+/** ФИО check for contract signing. */
+export function requireSignedName(body) {
+  const signedName = str(body?.signedName)
+  if (!signedName || signedName.length < 2) throw bad('Укажите ФИО (не менее 2 символов)')
+  return signedName
+}
+
+/**
+ * Signature fields of a signed entity row (invites/documents), SPEC §17.
+ * Legacy rows with signature_kind = NULL are treated as 'png'.
+ */
+export function signedFields(row) {
+  const hasSignature = !!row.signature || !!row.signature_text
+  return {
+    signature: row.signature ?? null,
+    signatureKind: hasSignature ? row.signature_kind || 'png' : null,
+    signatureText: row.signature_text ?? null,
+    signedName: row.signed_name ?? null,
+    signedAt: row.signed_at ?? null,
+  }
+}
+
+/**
+ * documents row → API shape (SPEC v2 §10–12, v2.1 §17).
+ * Used for both `join_application` and `dismissal` documents.
+ */
+export function documentDto(row) {
+  if (!row) return null
+  return {
+    id: row.id,
+    orgId: row.org_id,
+    type: row.type,
+    targetUserId: row.target_user_id,
+    createdBy: row.created_by,
+    status: row.status,
+    message: row.message ?? null,
+    contractText: row.contract_text,
+    ...signedFields(row),
+    createdAt: row.created_at,
+    resolvedAt: row.resolved_at ?? null,
+  }
+}
+
 // ---- org row → org shape ----
 export function publicOrg(row, membersCount, channelsCount) {
   return {
@@ -53,6 +146,8 @@ export function publicOrg(row, membersCount, channelsCount) {
     createdAt: row.created_at,
     membersCount,
     channelsCount,
+    // SPEC v2 §12: catalog visibility. Missing column value (legacy row) => public.
+    isPublic: row.is_public === undefined || row.is_public === null ? true : !!row.is_public,
   }
 }
 

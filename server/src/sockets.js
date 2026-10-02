@@ -5,6 +5,7 @@ import {
   findMember,
   isChannelMember,
   channelMemberIds,
+  touchChannelRead,
   run,
   get,
 } from './db.js'
@@ -15,6 +16,21 @@ import { HttpError } from './util.js'
 // ---------- presence ----------
 const socketsByUser = new Map() // userId -> Set<socketId>
 const onlineUsers = new Set()
+let mainIo = null // set in initSockets — used by admin ban (SPEC v4 §23)
+
+/** Online users count for GET /api/admin/stats. */
+export function onlineCount() {
+  return onlineUsers.size
+}
+
+/** Disconnect every active socket of a user (ban, SPEC v4 §23). Returns sockets dropped. */
+export function disconnectUserSockets(userId) {
+  if (!mainIo) return 0
+  const set = socketsByUser.get(userId)
+  const count = set ? set.size : 0
+  if (count) mainIo.in(`user:${userId}`).disconnectSockets(true)
+  return count
+}
 
 // ---------- typing throttle: per socket+channel, >=1 per 2s ----------
 const lastTypingAt = new Map() // `${socketId}:${channelId}` -> ts
@@ -204,6 +220,8 @@ function attachCalls(socket, io, userId) {
 }
 
 export function initSockets(io) {
+  mainIo = io
+
   // auth handshake
   io.use((socket, next) => {
     try {
@@ -212,6 +230,7 @@ export function initSockets(io) {
       if (!userId) return next(new Error('unauthorized'))
       const user = findUserById(userId)
       if (!user) return next(new Error('unauthorized'))
+      if (user.banned) return next(new Error('unauthorized')) // SPEC v4 §23
       socket.data.user = user
       next()
     } catch {
@@ -304,6 +323,30 @@ export function initSockets(io) {
             },
             typing,
           })
+        }
+      } catch {
+        // ignore relay errors
+      }
+    })
+
+    // ---------- channel:read (SPEC v3 §18) ----------
+    // payload {channelId, lastReadAt?} -> relayed to other members as
+    // {channelId, userId, lastReadAt}; also persisted for unread counters.
+    socket.on('channel:read', (payload) => {
+      try {
+        const channelId = str(payload?.channelId)
+        if (!channelId) return
+        requireChannelAccess(channelId, user.id)
+
+        let at = Date.now()
+        if (payload?.lastReadAt !== undefined && Number.isFinite(Number(payload.lastReadAt))) {
+          at = Number(payload.lastReadAt)
+        }
+        touchChannelRead(channelId, user.id, at)
+
+        for (const uid of channelMemberIds(channelId)) {
+          if (uid === user.id) continue
+          emitToUser(io, uid, 'channel:read', { channelId, userId: user.id, lastReadAt: at })
         }
       } catch {
         // ignore relay errors

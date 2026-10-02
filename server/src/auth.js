@@ -1,6 +1,6 @@
 import jwt from 'jsonwebtoken'
 import { findUserById, findMember, get } from './db.js'
-import { unauthorized, forbidden, notFound, publicUser, rankOf } from './util.js'
+import { unauthorized, forbidden, notFound, publicUser, rankOf, isAdminUsername } from './util.js'
 
 const SECRET = process.env.JWT_SECRET || 'atrium-dev-secret'
 const EXPIRES_IN = '30d'
@@ -28,8 +28,23 @@ export function requireAuth(req, res, next) {
     if (!userId) throw unauthorized('Недействительный или истёкший токен')
     const row = findUserById(userId)
     if (!row) throw unauthorized('Пользователь не найден')
+    if (row.banned) throw unauthorized('Аккаунт заблокирован') // SPEC v4 §23
     req.user = publicUser(row)
     req.userId = row.id
+    next()
+  } catch (err) {
+    next(err)
+  }
+}
+
+/**
+ * Superadmin guard (SPEC v23): username must be in ATRIUM_ADMIN list.
+ * 403 «Доступ запрещён» otherwise. Mount after requireAuth.
+ */
+export function requireAdmin(req, res, next) {
+  try {
+    const row = findUserById(req.userId)
+    if (!row || !isAdminUsername(row.username)) throw forbidden('Доступ запрещён')
     next()
   } catch (err) {
     next(err)

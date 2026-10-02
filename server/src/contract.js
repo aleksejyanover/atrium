@@ -32,3 +32,33 @@ export function buildContractText({ orgName, role, createdAt }) {
 Подпись: {signature image is appended by the app after drawing}
 `
 }
+
+/**
+ * Dismissal contract template (SPEC §11) — filled at dismissal creation and
+ * snapshotted into documents.contract_text.
+ * `reason` defaults: «по собственному желанию» when the employee initiated it
+ * themselves, otherwise «по инициативе организации».
+ */
+export function buildDismissalContractText({ orgName, role, reason, initiatedByTarget, createdAt }) {
+  const label = roleLabel(role)
+  const filledReason =
+    (typeof reason === 'string' && reason.trim()) ||
+    (initiatedByTarget ? 'по собственному желанию' : 'по инициативе организации')
+  return `ДОГОВОР ОБ УВОЛЬНЕНИИ ИЗ ОРГАНИЗАЦИИ «${orgName}»
+
+Я, нижеподписавшийся(яся) ______________ (ФИО), настоящим подтверждаю
+прекращение моего участия в организации «${orgName}» в роли «${label}».
+
+Причина: ${filledReason}
+
+1. С моего участия в организация снимаются все обязательства, связанные
+   с доступом к каналам, чатам и звонкам организации.
+2. Доступ к внутренним ресурсам организации прекращается с момента подписи.
+3. Настоящий договор вступает в силу с момента подписи и является окончательным.
+
+Дата: ${formatDate(createdAt)}
+Роль: ${label}
+
+Подпись: {изображение подписи добавляется приложением после отрисовки}
+`
+}

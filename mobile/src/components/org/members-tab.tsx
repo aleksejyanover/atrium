@@ -5,23 +5,28 @@ import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-nati
 import { Avatar, RoleBadge } from '@/components/avatar';
 import { Button, Empty } from '@/components/controls';
 import { AppModal } from '@/components/modal';
-import { chatApi, orgsApi } from '@/lib/endpoints';
+import { RolesMatrix } from '@/components/roles-matrix';
+import { chatApi, dismissalsApi, orgsApi } from '@/lib/endpoints';
 import {
   ROLE_LABELS,
   assignableRoles,
   canChangeRole,
   canCreateChannel,
+  canDismiss,
   canLeaveOrg,
-  canRemoveMember,
+  canReviewDismissals,
+  canTerminate,
 } from '@/lib/roles';
 import { colors, radius } from '@/lib/theme';
-import { Member, Role } from '@/lib/types';
+import { Member, OrgDismissalItem, Role } from '@/lib/types';
 
 interface Props {
   orgId: string;
   members: Member[];
   actorRole: Role;
   meId: string;
+  /** Договоры об увольнении организации (rank ≥ 40). */
+  dismissals: OrgDismissalItem[];
   onOpenDm(channelId: string): void;
   onMembersChanged(): Promise<void>;
   onLeave(): void;
@@ -32,14 +37,21 @@ export function MembersTab({
   members,
   actorRole,
   meId,
+  dismissals,
   onOpenDm,
   onMembersChanged,
   onLeave,
 }: Props) {
   const [selected, setSelected] = useState<Member | null>(null);
   const [busy, setBusy] = useState(false);
+  const [matrixOpen, setMatrixOpen] = useState(false);
 
   const close = () => setSelected(null);
+
+  const pendingDismissalFor = (userId: string): OrgDismissalItem | null =>
+    dismissals.find(
+      (item) => item.document.targetUserId === userId && item.document.status === 'pending',
+    ) ?? null;
 
   const changeRole = async (target: Member, role: Role) => {
     if (!canChangeRole(actorRole, target.role, role) || role === target.role) return;
@@ -55,23 +67,82 @@ export function MembersTab({
     }
   };
 
-  const removeMember = (target: Member) => {
+  /** Увольнение через dismissal-документ (SPEC v2 §12 — вместо удаления). */
+  const dismissMember = (target: Member) => {
     Alert.alert(
-      'Удалить из организации',
-      `Удалить ${target.user.displayName} из организации?`,
+      'Уволить сотрудника?',
+      'Сотруднику будет отправлен договор об увольнении, который он должен подписать от руки',
       [
         { text: 'Отмена', style: 'cancel' },
         {
-          text: 'Удалить',
+          text: 'Отправить договор',
           style: 'destructive',
           onPress: () => {
             void (async () => {
+              setBusy(true);
               try {
-                await orgsApi.removeMember(orgId, target.user.id);
+                await dismissalsApi.create(orgId, { userId: target.user.id });
                 await onMembersChanged();
                 close();
               } catch (e) {
-                Alert.alert('Удаление', e instanceof Error ? e.message : 'Ошибка');
+                Alert.alert('Увольнение', e instanceof Error ? e.message : 'Ошибка');
+              } finally {
+                setBusy(false);
+              }
+            })();
+          },
+        },
+      ],
+    );
+  };
+
+  const cancelDismissal = (target: Member) => {
+    const pending = pendingDismissalFor(target.user.id);
+    if (!pending) return;
+    Alert.alert('Отменить увольнение?', `Сотрудник ${target.user.displayName} останется`, [
+      { text: 'Назад', style: 'cancel' },
+      {
+        text: 'Отменить увольнение',
+        onPress: () => {
+          void (async () => {
+            setBusy(true);
+            try {
+              await dismissalsApi.cancel(pending.document.id);
+              await onMembersChanged();
+              close();
+            } catch (e) {
+              Alert.alert('Отмена увольнения', e instanceof Error ? e.message : 'Ошибка');
+            } finally {
+              setBusy(false);
+            }
+          })();
+        },
+      },
+    ]);
+  };
+
+  const terminateMember = (target: Member) => {
+    const pending = pendingDismissalFor(target.user.id);
+    if (!pending) return;
+    Alert.alert(
+      'Расторгнуть в одностороннем порядке?',
+      'Членство будет прекращено немедленно, без подписи сотрудника',
+      [
+        { text: 'Отмена', style: 'cancel' },
+        {
+          text: 'Расторгнуть',
+          style: 'destructive',
+          onPress: () => {
+            void (async () => {
+              setBusy(true);
+              try {
+                await dismissalsApi.terminate(pending.document.id);
+                await onMembersChanged();
+                close();
+              } catch (e) {
+                Alert.alert('Расторжение', e instanceof Error ? e.message : 'Ошибка');
+              } finally {
+                setBusy(false);
               }
             })();
           },
@@ -114,50 +185,70 @@ export function MembersTab({
   };
 
   const options = selected ? assignableRoles(actorRole, selected.role) : [];
+  const selectedPending = selected ? pendingDismissalFor(selected.user.id) : null;
+  const selectedDismissable =
+    selected && !selectedPending && canDismiss(actorRole, selected.role);
+  const canTerminateSelected =
+    selectedPending !== null && selected && canTerminate(actorRole, selected.role);
 
   return (
     <ScrollView contentContainerStyle={styles.content}>
       <View style={styles.sectionHeader}>
         <Text style={styles.sectionTitle}>Участники · {members.length}</Text>
-        {canCreateChannel(actorRole) ? (
-          <View style={styles.hintChip}>
+        <View style={styles.headerChips}>
+          <Pressable onPress={() => setMatrixOpen(true)} style={styles.hintChip}>
             <Feather name="shield" size={12} color={colors.muted} />
-            <Text style={styles.hintText}>{ROLE_LABELS[actorRole]}</Text>
-          </View>
-        ) : null}
+            <Text style={styles.hintText}>Роли и права</Text>
+          </Pressable>
+          {canCreateChannel(actorRole) ? (
+            <View style={styles.hintChip}>
+              <Feather name="award" size={12} color={colors.muted} />
+              <Text style={styles.hintText}>{ROLE_LABELS[actorRole]}</Text>
+            </View>
+          ) : null}
+        </View>
       </View>
 
       {members.length === 0 ? (
         <Empty text="Нет участников" />
       ) : (
-        members.map((member) => (
-          <Pressable
-            key={member.user.id}
-            disabled={member.user.id === meId}
-            onPress={() => setSelected(member)}
-            style={({ pressed }) => [
-              styles.row,
-              member.user.id === meId && { borderColor: 'rgba(124,108,246,0.4)' },
-              pressed && { opacity: 0.75 },
-            ]}>
-            <Avatar name={member.user.displayName} color={member.user.avatarColor} size={38} />
-            <View style={{ flex: 1 }}>
-              <Text style={styles.rowTitle} numberOfLines={1}>
-                {member.user.displayName}
-                {member.user.id === meId ? (
-                  <Text style={styles.you}> · вы</Text>
-                ) : null}
-              </Text>
-              <Text style={styles.rowMeta} numberOfLines={1}>
-                @{member.user.username}
-              </Text>
-            </View>
-            <RoleBadge role={member.role} />
-            {member.user.id !== meId ? (
-              <Feather name="chevron-right" size={18} color={colors.muted} />
-            ) : null}
-          </Pressable>
-        ))
+        members.map((member) => {
+          const pending =
+            canReviewDismissals(actorRole) && pendingDismissalFor(member.user.id) !== null;
+          return (
+            <Pressable
+              key={member.user.id}
+              disabled={member.user.id === meId}
+              onPress={() => setSelected(member)}
+              style={({ pressed }) => [
+                styles.row,
+                member.user.id === meId && { borderColor: 'rgba(124,108,246,0.4)' },
+                pressed && { opacity: 0.75 },
+              ]}>
+              <Avatar name={member.user.displayName} color={member.user.avatarColor} size={38} />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.rowTitle} numberOfLines={1}>
+                  {member.user.displayName}
+                  {member.user.id === meId ? (
+                    <Text style={styles.you}> · вы</Text>
+                  ) : null}
+                </Text>
+                <Text style={styles.rowMeta} numberOfLines={1}>
+                  @{member.user.username}
+                </Text>
+              </View>
+              {pending ? (
+                <View style={styles.pendingChip}>
+                  <Text style={styles.pendingChipText}>Ожидает подписи</Text>
+                </View>
+              ) : null}
+              <RoleBadge role={member.role} />
+              {member.user.id !== meId ? (
+                <Feather name="chevron-right" size={18} color={colors.muted} />
+              ) : null}
+            </Pressable>
+          );
+        })
       )}
 
       {canLeaveOrg(actorRole) ? (
@@ -169,6 +260,13 @@ export function MembersTab({
           onPress={confirmLeave}
         />
       ) : null}
+
+      <AppModal
+        visible={matrixOpen}
+        title="Роли и права"
+        onClose={() => setMatrixOpen(false)}>
+        <RolesMatrix currentRole={actorRole} />
+      </AppModal>
 
       <AppModal
         visible={selected !== null}
@@ -188,6 +286,19 @@ export function MembersTab({
               </View>
               <RoleBadge role={selected.role} />
             </View>
+
+            {selectedPending ? (
+              <View style={styles.pendingCard}>
+                <View style={styles.pendingCardHead}>
+                  <Feather name="clock" size={15} color={colors.accent} />
+                  <Text style={styles.pendingCardTitle}>Ожидает подписи</Text>
+                </View>
+                <Text style={styles.pendingCardText}>
+                  Сотруднику отправлен договор об увольнении от{' '}
+                  {new Date(selectedPending.document.createdAt).toLocaleDateString('ru-RU')}
+                </Text>
+              </View>
+            ) : null}
 
             <View>
               <Text style={styles.modalLabel}>Изменить роль</Text>
@@ -225,12 +336,31 @@ export function MembersTab({
                 loading={busy}
                 onPress={() => void openDm(selected)}
               />
-              {canRemoveMember(actorRole, selected.role) ? (
+              {selectedDismissable ? (
                 <Button
-                  title="Удалить из организации"
-                  variant="ghost"
+                  title="Уволить"
+                  variant="danger"
                   icon="user-x"
-                  onPress={() => removeMember(selected)}
+                  disabled={busy}
+                  onPress={() => dismissMember(selected)}
+                />
+              ) : null}
+              {selectedPending ? (
+                <Button
+                  title="Отменить увольнение"
+                  variant="ghost"
+                  icon="rotate-ccw"
+                  disabled={busy}
+                  onPress={() => cancelDismissal(selected)}
+                />
+              ) : null}
+              {canTerminateSelected ? (
+                <Button
+                  title="Расторгнуть в одностороннем порядке"
+                  variant="danger"
+                  icon="slash"
+                  disabled={busy}
+                  onPress={() => terminateMember(selected)}
                   style={{ borderColor: 'rgba(240,80,110,0.5)' }}
                 />
               ) : null}
@@ -253,6 +383,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     marginBottom: 8,
+    gap: 8,
   },
   sectionTitle: {
     color: colors.muted,
@@ -260,6 +391,12 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     textTransform: 'uppercase',
     letterSpacing: 1,
+  },
+  headerChips: {
+    flexDirection: 'row',
+    gap: 6,
+    flexWrap: 'wrap',
+    justifyContent: 'flex-end',
   },
   hintChip: {
     flexDirection: 'row',
@@ -279,7 +416,7 @@ const styles = StyleSheet.create({
   row: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
+    gap: 10,
     backgroundColor: colors.panel,
     borderColor: colors.border,
     borderWidth: 1,
@@ -301,6 +438,19 @@ const styles = StyleSheet.create({
     fontSize: 12,
     marginTop: 2,
   },
+  pendingChip: {
+    backgroundColor: 'rgba(124,108,246,0.14)',
+    borderColor: 'rgba(124,108,246,0.5)',
+    borderWidth: 1,
+    borderRadius: radius.sm,
+    paddingHorizontal: 7,
+    paddingVertical: 3,
+  },
+  pendingChipText: {
+    color: colors.accent,
+    fontSize: 10,
+    fontWeight: '600',
+  },
   profileRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -310,6 +460,29 @@ const styles = StyleSheet.create({
     color: colors.text,
     fontSize: 16,
     fontWeight: '600',
+  },
+  pendingCard: {
+    backgroundColor: 'rgba(124,108,246,0.08)',
+    borderColor: 'rgba(124,108,246,0.4)',
+    borderWidth: 1,
+    borderRadius: radius.md,
+    padding: 12,
+    gap: 6,
+  },
+  pendingCardHead: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  pendingCardTitle: {
+    color: colors.accent,
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  pendingCardText: {
+    color: colors.muted,
+    fontSize: 12,
+    lineHeight: 17,
   },
   modalLabel: {
     color: colors.muted,

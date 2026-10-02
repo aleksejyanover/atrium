@@ -20,9 +20,10 @@ import { Button } from '@/components/controls';
 import { AuthGuard, ScreenHeader } from '@/components/screen';
 import { chatApi, orgsApi } from '@/lib/endpoints';
 import { formatDaySeparator, formatTime } from '@/lib/format';
+import { noteLocalRead, setOpenChannelId } from '@/lib/read-state';
 import { canDeleteMessage } from '@/lib/roles';
 import { colors, radius } from '@/lib/theme';
-import { Message, Role, User } from '@/lib/types';
+import { Message, ReadEntry, Role, User } from '@/lib/types';
 import { useAuth } from '@/state/auth';
 import { useCall } from '@/state/call';
 import { useSocket, useSocketEvent } from '@/state/socket';
@@ -32,6 +33,8 @@ type RenderItem =
   | { kind: 'message'; key: string; message: Message; showAuthor: boolean };
 
 const MAX_TEXT = 4000;
+/** POST .../read не чаще 1 раза в 3 секунды на канал (SPEC v3 §18). */
+const READ_THROTTLE_MS = 3000;
 
 export default function ChatRoute() {
   return (
@@ -60,11 +63,66 @@ function ChatScreen() {
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  /** Участники орг. — знаменатель «Прочитано: N из M» в каналах. */
+  const [orgMembers, setOrgMembers] = useState<{ id: string }[]>([]);
 
   const [text, setText] = useState('');
   const [typingNames, setTypingNames] = useState<string[]>([]);
   const lastTypingEmit = useRef(0);
   const listRef = useRef<FlatList<RenderItem>>(null);
+
+  // ---- прочтено (SPEC v3 §18) ------------------------------------------
+  const [reads, setReads] = useState<ReadEntry[]>([]);
+  const lastReadPostRef = useRef(0);
+  const meIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    meIdRef.current = user?.id ?? null;
+  }, [user?.id]);
+
+  /** Отметить канал прочитанным (throttle 3с/канал + локальный сброс бейджей). */
+  const markRead = useCallback(
+    (opts?: { force?: boolean }) => {
+      if (!channelId) return;
+      const now = Date.now();
+      if (!opts?.force && now - lastReadPostRef.current < READ_THROTTLE_MS) return;
+      lastReadPostRef.current = now;
+      noteLocalRead(channelId, now);
+      const meId = meIdRef.current;
+      void chatApi
+        .markRead(channelId, now)
+        .then(() => {
+          setReads((prev) => {
+            const others = prev.filter((entry) => entry.userId !== meId);
+            return [...others, { userId: meId ?? 'me', lastReadAt: now }];
+          });
+        })
+        .catch(() => {
+          // сервер недоступен — бейджи всё равно обнулены локально
+        });
+    },
+    [channelId],
+  );
+
+  // чат открыт → бейджи списка чатов обнуляются сразу, без ожидания сервера
+  useEffect(() => {
+    setOpenChannelId(channelId ?? null);
+    return () => setOpenChannelId(null);
+  }, [channelId]);
+
+  const refreshReads = useCallback(
+    (id?: string) => {
+      const target = id ?? channelId;
+      if (!target) return;
+      void chatApi
+        .readStatus(target)
+        .then((res) => setReads(res.reads ?? []))
+        .catch(() => {
+          // read-status опционален — показываем без квитанций
+        });
+    },
+    [channelId],
+  );
 
   // ---- initial load -----------------------------------------------------
   useEffect(() => {
@@ -80,6 +138,8 @@ function ChatScreen() {
         setMessages(page.messages);
         setHasMore(page.hasMore);
         setChannelType(info.channel.type);
+        void refreshReads(channelId);
+        markRead({ force: true });
         if (info.channel.type === 'dm' && info.peer) {
           setTitle(info.peer.displayName);
           setPeer(info.peer);
@@ -92,7 +152,10 @@ function ChatScreen() {
         if (info.org?.id) {
           try {
             const detail = await orgsApi.get(info.org.id);
-            if (!cancelled) setActorRole(detail.role);
+            if (!cancelled) {
+              setActorRole(detail.role);
+              setOrgMembers(detail.members.map((member) => ({ id: member.user.id })));
+            }
           } catch {
             // permission-sensitive actions stay hidden if the role is unknown
           }
@@ -106,7 +169,7 @@ function ChatScreen() {
     return () => {
       cancelled = true;
     };
-  }, [channelId]);
+  }, [channelId, markRead, refreshReads]);
 
   const loadOlder = useCallback(async () => {
     if (!channelId || loadingOlder || messages.length === 0 || !hasMore) return;
@@ -136,6 +199,18 @@ function ChatScreen() {
       return base.some((m) => m.id === message.id) ? base : [...base, message];
     });
     setTypingNames((prev) => prev.filter((n) => n !== message.sender.displayName));
+    // чат открыт → исходящие входящие помечаются прочитанными (throttle 3с)
+    markRead();
+    refreshReads();
+  });
+
+  // квитанции о прочтении других участников (SPEC v3 §18)
+  useSocketEvent('channel:read', (payload) => {
+    if (!channelId || payload.channelId !== channelId) return;
+    setReads((prev) => {
+      const others = prev.filter((entry) => entry.userId !== payload.userId);
+      return [...others, { userId: payload.userId, lastReadAt: payload.lastReadAt }];
+    });
   });
 
   useSocketEvent('typing', (payload) => {
@@ -284,6 +359,48 @@ function ChatScreen() {
     return items;
   }, [messages]);
 
+  /**
+   * Квитанция о прочтении (SPEC v3 §18, зеркало web):
+   * DM — у своих «Прочитано HH:MM» / «✓ Доставлено»;
+   * канал — «Прочитано: N из M» под последним своим сообщением.
+   */
+  const receiptFor = useCallback(
+    (message: Message, isLastOwn: boolean): string | null => {
+      if (channelType === 'dm') {
+        if (!user || message.sender.id !== user.id) return null;
+        const peerRead = peer
+          ? reads.find((entry) => entry.userId === peer.id)?.lastReadAt ?? 0
+          : 0;
+        return peerRead >= message.createdAt
+          ? `Прочитано ${formatTime(peerRead)}`
+          : '✓ Доставлено';
+      }
+      if (!isLastOwn) return null;
+      const total = orgMembers.length;
+      if (total === 0) return null;
+      const readCount = orgMembers.filter(
+        (member) =>
+          member.id === user?.id ||
+          reads.some((entry) => entry.userId === member.id && entry.lastReadAt >= message.createdAt),
+      ).length;
+      return `Прочитано: ${readCount} из ${total}`;
+    },
+    [channelType, orgMembers, peer, reads, user],
+  );
+
+  /** Последнее своё сообщение — под ним в канале показываем счётчик прочтений. */
+  const lastOwnMessageId = (() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].sender.id === user?.id) return messages[i].id;
+    }
+    return null;
+  })();
+
+  /** Прокрутка вниз → отметить прочитанным (SPEC v3 §18, throttle 3с). */
+  const onListScroll = useCallback(() => {
+    markRead();
+  }, [markRead]);
+
   if (loadError) {
     return (
       <View style={styles.screen}>
@@ -337,6 +454,13 @@ function ChatScreen() {
             data={data}
             keyExtractor={(item) => item.key}
             contentContainerStyle={styles.listContent}
+            onScroll={(event) => {
+              const { contentOffset, layoutMeasurement, contentSize } = event.nativeEvent;
+              const distanceFromBottom =
+                contentSize.height - layoutMeasurement.height - contentOffset.y;
+              if (distanceFromBottom < 80) onListScroll();
+            }}
+            scrollEventThrottle={400}
             renderItem={({ item }) =>
               item.kind === 'date' ? (
                 <View style={styles.dateRow}>
@@ -347,6 +471,7 @@ function ChatScreen() {
                   message={item.message}
                   showAuthor={item.showAuthor}
                   own={item.message.sender.id === user?.id}
+                  receipt={receiptFor(item.message, item.message.id === lastOwnMessageId)}
                   canDelete={canDeleteMessage(
                     actorRole,
                     user?.id ?? '',
@@ -430,12 +555,14 @@ function MessageRow({
   message,
   showAuthor,
   own,
+  receipt,
   canDelete,
   onDelete,
 }: {
   message: Message;
   showAuthor: boolean;
   own: boolean;
+  receipt?: string | null;
   canDelete: boolean;
   onDelete(): void;
 }) {
@@ -452,7 +579,12 @@ function MessageRow({
         </Text>
       ) : null}
       <Text style={styles.messageText}>{message.text}</Text>
-      <Text style={styles.time}>{formatTime(message.createdAt)}</Text>
+      <View style={styles.metaRow}>
+        <Text style={styles.time}>{formatTime(message.createdAt)}</Text>
+        {receipt ? (
+          <Text style={[styles.receipt, own && styles.receiptOwn]}>{receipt}</Text>
+        ) : null}
+      </View>
     </View>
   );
 
@@ -596,11 +728,23 @@ const styles = StyleSheet.create({
     fontSize: 15,
     lineHeight: 21,
   },
+  metaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: 6,
+    marginTop: 4,
+  },
   time: {
     color: colors.muted,
     fontSize: 10,
-    alignSelf: 'flex-end',
-    marginTop: 4,
+  },
+  receipt: {
+    color: colors.muted,
+    fontSize: 10,
+  },
+  receiptOwn: {
+    color: 'rgba(124,108,246,0.9)',
   },
   empty: {
     color: colors.muted,

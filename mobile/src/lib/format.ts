@@ -49,6 +49,29 @@ export function formatCallDuration(seconds: number): string {
   return `${pad(m)}:${pad(s)}`;
 }
 
+/** Целые рубли с пробелами между разрядами: 12500 → «12 500» (SPEC v4 §24). */
+export function rubNumber(value: number): string {
+  const n = Math.trunc(Number(value) || 0);
+  const sign = n < 0 ? '-' : '';
+  return `${sign}${String(Math.abs(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ' ')}`;
+}
+
+/** Деньги: «12 500 ₽» (SPEC v4 §24). */
+export function rub(value: number): string {
+  return `${rubNumber(value)} ₽`;
+}
+
+/** Сумма со знаком операции: «+1 000 ₽» / «−500 ₽». */
+export function rubSigned(value: number, incoming: boolean): string {
+  return `${incoming ? '+' : '−'}${rubNumber(Math.abs(value))} ₽`;
+}
+
+/** Номер карты с маской ввода 0000 0000 0000 0000 (SPEC v4 §24). */
+export function formatCardNumber(digits: string): string {
+  const only = digits.replace(/\D/g, '').slice(0, 16);
+  return only.replace(/(\d{4})(?=\d)/g, '$1 ');
+}
+
 /** «5 участников», «21 участник», «11 участников» */
 export function pluralizeMembers(count: number): string {
   const mod10 = count % 10;

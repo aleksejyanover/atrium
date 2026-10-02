@@ -41,6 +41,9 @@ export const fontMedium = Platform.select({
   default: 'system',
 }) as string;
 
+/** Шрифт личной подписи (Caveat, @expo-google-fonts/caveat — SPEC §17). */
+export const CAVEAT_FONT = 'Caveat_400Regular';
+
 /** No heavy shadows — at most a soft one on modals (SPEC). */
 export const modalShadow: ViewStyle = {
   shadowColor: '#000',

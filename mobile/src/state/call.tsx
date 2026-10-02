@@ -18,7 +18,34 @@ import {
 import { useSocket } from '@/state/socket';
 import { useToast } from '@/state/toast';
 
-const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }];
+/**
+ * ICE servers (SPEC §21.5): several STUN servers (Google STUN is often blocked)
+ * plus a free TURN relay so calls work across different networks.
+ */
+const ICE_SERVERS: RTCIceServer[] = [
+  {
+    urls: [
+      'stun:stun.cloudflare.com:3478',
+      'stun:stun.voipgate.com:3478',
+      'stun:stun.sipgate.net:3478',
+      'stun:stun.l.google.com:19302',
+    ],
+  },
+  {
+    urls: [
+      'turn:openrelay.metered.ca:80',
+      'turn:openrelay.metered.ca:443',
+      'turn:openrelay.metered.ca:443?tcp',
+    ],
+    username: 'openrelayproject',
+    credential: 'openrelayproject',
+  },
+];
+
+/** SPEC §21.2/3: never leave the user in an infinite «Вызов…». */
+const CONNECT_TIMEOUT_MS = 20000;
+const NO_ANSWER_MESSAGE = 'Собеседник не отвечает';
+const CONNECT_FAILED_MESSAGE = 'Не удалось установить соединение. Проверьте интернет у собеседника';
 
 function toIceCandidate(payload: IceCandidatePayload): RTCIceCandidate {
   return new RTCIceCandidate({
@@ -82,6 +109,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
   const statusRef = useRef<CallStatus>('idle');
   const stateRef = useRef<CallState>(state);
   const pendingIceRef = useRef<IceCandidatePayload[]>([]);
+  const connectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingSdpRef = useRef<{
     callId: string;
     from: string | null;
@@ -121,7 +149,15 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
     [socket],
   );
 
+  const clearConnectTimer = useCallback(() => {
+    if (connectTimerRef.current) {
+      clearTimeout(connectTimerRef.current);
+      connectTimerRef.current = null;
+    }
+  }, []);
+
   const teardown = useCallback(() => {
+    clearConnectTimer();
     try {
       pcRef.current?.close();
     } catch {
@@ -145,7 +181,33 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
     peerIdRef.current = null;
     statusRef.current = 'idle';
     setState(IDLE);
-  }, []);
+  }, [clearConnectTimer]);
+
+  /** Завершить звонок с понятной ошибкой (SPEC §21.2/3 — не зависать в «Вызов…»). */
+  const failConnection = useCallback(
+    (message: string) => {
+      if (statusRef.current === 'idle') return;
+      const callId = callIdRef.current;
+      if (callId) void rpc('call:leave', { callId });
+      teardown();
+      Alert.alert('Звонок', message);
+    },
+    [rpc, teardown],
+  );
+
+  /** 20 секунд на ответ/соединение — по истечении ошибка и сброс (SPEC §21.2). */
+  const armConnectTimer = useCallback(() => {
+    clearConnectTimer();
+    connectTimerRef.current = setTimeout(() => {
+      connectTimerRef.current = null;
+      const status = statusRef.current;
+      if (status === 'outgoing') {
+        failConnection(NO_ANSWER_MESSAGE);
+      } else if (status === 'connecting') {
+        failConnection(CONNECT_FAILED_MESSAGE);
+      }
+    }, CONNECT_TIMEOUT_MS);
+  }, [clearConnectTimer, failConnection]);
 
   const getMedia = useCallback(async (kind: CallKind): Promise<MediaStream> => {
     const stream = await mediaDevices.getUserMedia({
@@ -188,6 +250,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
     pc.ontrack = (event: any) => {
       const stream: MediaStream | undefined = event?.streams?.[0];
       if (!stream) return;
+      clearConnectTimer();
       setState((prev) => ({
         ...prev,
         remoteStream: stream,
@@ -198,20 +261,22 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
     pc.onconnectionstatechange = () => {
       const connection = pc.connectionState;
       if (connection === 'connected') {
+        clearConnectTimer();
         setState((prev) =>
           prev.status === 'idle' || prev.status === 'incoming'
             ? prev
             : { ...prev, status: 'active' },
         );
       } else if (connection === 'failed') {
-        show('Соединение потеряно');
-        void rpc('call:leave', { callId: callIdRef.current ?? '' });
-        teardown();
+        failConnection(CONNECT_FAILED_MESSAGE);
+      } else if (connection === 'disconnected') {
+        // transient: показываем статус, но не рвём звонок сразу (SPEC §21.2)
+        if (statusRef.current !== 'idle') show('Соединение нестабильно');
       }
     };
 
     return pc;
-  }, [rpc, show, teardown]);
+  }, [clearConnectTimer, failConnection, rpc, show]);
 
   /** Apply a remote SDP; queue it when the peer connection is not ready yet. */
   const handleRemoteSdp = useCallback(
@@ -274,9 +339,12 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
 
     const onAccepted = (payload: { callId: string }) => {
       if (payload.callId !== callIdRef.current) return;
+      if (statusRef.current !== 'outgoing') return;
+      statusRef.current = 'connecting';
       setState((prev) =>
         prev.status === 'outgoing' ? { ...prev, status: 'connecting' } : prev,
       );
+      armConnectTimer();
     };
 
     const onRejected = (payload: { callId: string }) => {
@@ -345,7 +413,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
       socket.off('rtc:sdp', onSdp);
       socket.off('rtc:ice', onIce);
     };
-  }, [socket, handleRemoteSdp, teardown, show]);
+  }, [socket, handleRemoteSdp, teardown, show, armConnectTimer]);
 
   // ---- public actions ---------------------------------------------------
   const startCall = useCallback(
@@ -353,6 +421,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
       if (statusRef.current !== 'idle') return;
       setState({ ...IDLE, status: 'outgoing', peer, kind, channelId, isCaller: true });
       statusRef.current = 'outgoing';
+      armConnectTimer();
 
       const res = await rpc('call:invite', {
         calleeId: peer.id,
@@ -360,10 +429,11 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
         channelId,
       });
       if (!res || res.error || !res.callId) {
-        setState(IDLE);
+        teardown();
         Alert.alert('Звонок', res?.error ?? 'Не удалось начать звонок');
         return;
       }
+      // приглашение подтверждено — callId получен; ждём ответа собеседника (см. таймер выше)
 
       callIdRef.current = res.callId;
       peerIdRef.current = peer.id;
@@ -395,7 +465,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
         );
       }
     },
-    [createPeerConnection, getMedia, rpc, teardown],
+    [armConnectTimer, createPeerConnection, getMedia, rpc, teardown],
   );
 
   const acceptCall = useCallback(async () => {
@@ -414,6 +484,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
 
       setState((prev) => ({ ...prev, status: 'connecting', localStream: local }));
       statusRef.current = 'connecting';
+      armConnectTimer();
 
       const buffered = pendingSdpRef.current;
       if (buffered) {
@@ -431,7 +502,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
           : 'Нет доступа к камере или микрофону',
       );
     }
-  }, [createPeerConnection, flushIce, getMedia, handleRemoteSdp, rpc, state.kind, teardown]);
+  }, [armConnectTimer, createPeerConnection, flushIce, getMedia, handleRemoteSdp, rpc, state.kind, teardown]);
 
   const rejectCall = useCallback(() => {
     const callId = callIdRef.current;

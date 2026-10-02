@@ -7,6 +7,7 @@ import {
   RefreshControl,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   View,
 } from 'react-native';
@@ -38,7 +39,7 @@ function OrgPickerScreen() {
   const insets = useSafeAreaInsets();
   const { user, logout } = useAuth();
   const { show } = useToast();
-  const { orgs, invites, loading, refresh } = useOrgs();
+  const { orgs, invites, pendingDocuments, loading, refresh } = useOrgs();
 
   const [refreshing, setRefreshing] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
@@ -46,6 +47,7 @@ function OrgPickerScreen() {
 
   const [orgName, setOrgName] = useState('');
   const [orgDescription, setOrgDescription] = useState('');
+  const [isPublic, setIsPublic] = useState(true);
   const [creating, setCreating] = useState(false);
 
   useFocusEffect(
@@ -74,10 +76,12 @@ function OrgPickerScreen() {
       const res = await orgsApi.create({
         name,
         description: orgDescription.trim() || undefined,
+        isPublic,
       });
       setCreateOpen(false);
       setOrgName('');
       setOrgDescription('');
+      setIsPublic(true);
       await refresh();
       router.push(`/org/${res.org.id}`);
     } catch (e) {
@@ -102,6 +106,23 @@ function OrgPickerScreen() {
           <Text style={styles.headerTitle}>Организации</Text>
         </View>
         <View style={styles.headerActions}>
+          <View>
+            <IconButton name="globe" onPress={() => router.push('/catalog')} size={18} />
+          </View>
+          <View>
+            <IconButton
+              name="file-text"
+              onPress={() => router.push('/documents')}
+              size={18}
+            />
+            {pendingDocuments > 0 ? (
+              <View style={styles.badge}>
+                <Text style={styles.badgeText}>
+                  {pendingDocuments > 9 ? '9+' : pendingDocuments}
+                </Text>
+              </View>
+            ) : null}
+          </View>
           <View>
             <IconButton name="mail" onPress={() => setInvitesOpen(true)} size={18} />
             {invites.length > 0 ? (
@@ -154,6 +175,19 @@ function OrgPickerScreen() {
           </Pressable>
         ))}
 
+        <Pressable
+          onPress={() => router.push('/catalog')}
+          style={({ pressed }) => [styles.catalogCard, pressed && { opacity: 0.8 }]}>
+          <View style={styles.catalogIcon}>
+            <Feather name="globe" size={18} color={colors.accent} />
+          </View>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.orgName}>Каталог организаций</Text>
+            <Text style={styles.orgDescription}>Найдите организацию и подайте заявление</Text>
+          </View>
+          <Feather name="chevron-right" size={18} color={colors.muted} />
+        </Pressable>
+
         <Button
           title="Создать организацию"
           icon="plus"
@@ -163,7 +197,13 @@ function OrgPickerScreen() {
         />
       </ScrollView>
 
-      <View style={[styles.profile, { paddingBottom: insets.bottom + 12 }]}>
+      <Pressable
+        onPress={() => router.push('/profile')}
+        style={({ pressed }) => [
+          styles.profile,
+          { paddingBottom: insets.bottom + 12 },
+          pressed && { opacity: 0.8 },
+        ]}>
         <Avatar
           name={user?.displayName ?? '?'}
           color={user?.avatarColor ?? colors.accent}
@@ -177,8 +217,12 @@ function OrgPickerScreen() {
             @{user?.username ?? '—'}
           </Text>
         </View>
+        <View>
+          <IconButton name="credit-card" onPress={() => router.push('/wallet')} size={18} />
+        </View>
+        <Feather name="user" size={18} color={colors.muted} style={{ marginRight: 4 }} />
         <Button title="Выйти" variant="ghost" small icon="log-out" onPress={confirmLogout} />
-      </View>
+      </Pressable>
 
       <AppModal
         visible={createOpen}
@@ -200,6 +244,18 @@ function OrgPickerScreen() {
           maxLength={200}
           multiline
         />
+        <View style={styles.switchRow}>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.switchLabel}>Публичная организация</Text>
+            <Text style={styles.switchHint}>Видна в каталоге — к ней можно подать заявление</Text>
+          </View>
+          <Switch
+            value={isPublic}
+            onValueChange={setIsPublic}
+            trackColor={{ false: colors.border, true: 'rgba(124,108,246,0.5)' }}
+            thumbColor={isPublic ? colors.accent : colors.muted}
+          />
+        </View>
       </AppModal>
 
       <AppModal
@@ -314,6 +370,48 @@ const styles = StyleSheet.create({
     color: colors.muted,
     fontSize: 12,
     marginTop: 3,
+  },
+  catalogCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: 'rgba(124,108,246,0.08)',
+    borderColor: 'rgba(124,108,246,0.4)',
+    borderWidth: 1,
+    borderRadius: radius.lg,
+    padding: 14,
+    marginTop: 4,
+  },
+  catalogIcon: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: colors.panel2,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  switchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: colors.panel2,
+    borderColor: colors.border,
+    borderWidth: 1,
+    borderRadius: radius.md,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  switchLabel: {
+    color: colors.text,
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  switchHint: {
+    color: colors.muted,
+    fontSize: 12,
+    marginTop: 2,
   },
   inviteRow: {
     flexDirection: 'row',

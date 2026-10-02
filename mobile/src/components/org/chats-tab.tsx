@@ -1,14 +1,15 @@
 import { Feather } from '@expo/vector-icons';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Alert, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { Avatar } from '@/components/avatar';
 import { Button, Empty, Field } from '@/components/controls';
 import { AppModal } from '@/components/modal';
 import { orgsApi } from '@/lib/endpoints';
+import { getOpenChannelId, subscribeReadState } from '@/lib/read-state';
 import { colors, radius } from '@/lib/theme';
 import { Channel, DMItem } from '@/lib/types';
-import { useSocket } from '@/state/socket';
+import { useSocket, useSocketEvent } from '@/state/socket';
 
 interface Props {
   orgId: string;
@@ -18,6 +19,63 @@ interface Props {
   onOpen(channelId: string): void;
   onRefresh(): Promise<void>;
   onChannelCreated(channel: Channel): void;
+}
+
+/** Окно, в течение которого закрытый чат остаётся «прочитанным» локально. */
+const LOCAL_READ_GRACE_MS = 6000;
+
+/**
+ * Непрочитанные с учётом локального прочтения (SPEC v3 §18):
+ * открытый канал — 0 сразу; только что закрытый — 0 до прихода свежих
+ * счётчиков с сервера; входящие пока закрыт — локальный счётчик.
+ */
+function useUnreadCounts() {
+  const [openId, setOpenId] = useState<string | null>(getOpenChannelId());
+  const readAtRef = useRef<Record<string, number>>({});
+  const bumpRef = useRef<Record<string, number>>({});
+  const [, setTick] = useState(0);
+
+  useEffect(() => subscribeReadState(() => setOpenId(getOpenChannelId())), []);
+
+  // смена открытого канала: предыдущий считается прочитанным
+  const prevOpenRef = useRef<string | null>(openId);
+  useEffect(() => {
+    const prev = prevOpenRef.current;
+    if (prev && prev !== openId) {
+      readAtRef.current[prev] = Date.now();
+      bumpRef.current[prev] = 0;
+    }
+    if (openId) bumpRef.current[openId] = 0;
+    prevOpenRef.current = openId;
+  }, [openId]);
+
+  // входящие в закрытые каналы — локальный прирост без ожидания сервера
+  useSocketEvent('message:new', (payload) => {
+    const channelId = payload.message.channelId;
+    if (channelId === getOpenChannelId()) return;
+    bumpRef.current[channelId] = (bumpRef.current[channelId] ?? 0) + 1;
+    setTick((t) => t + 1);
+  });
+
+  const unreadOf = (channelId: string, serverUnread: number | undefined): number => {
+    if (openId === channelId) return 0;
+    const bump = bumpRef.current[channelId] ?? 0;
+    if (bump > 0) return bump;
+    const readAt = readAtRef.current[channelId];
+    if (readAt && Date.now() - readAt < LOCAL_READ_GRACE_MS) return 0;
+    return serverUnread ?? 0;
+  };
+
+  return unreadOf;
+}
+
+function UnreadBadge({ count }: { count: number }) {
+  if (count <= 0) return null;
+  return (
+    <View style={styles.badge}>
+      <Text style={styles.badgeText}>{count > 99 ? '99+' : count}</Text>
+    </View>
+  );
 }
 
 export function ChatsTab({
@@ -34,6 +92,7 @@ export function ChatsTab({
   const [channelName, setChannelName] = useState('');
   const [creating, setCreating] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const unreadOf = useUnreadCounts();
 
   const createChannel = async () => {
     const name = channelName.trim();
@@ -82,20 +141,34 @@ export function ChatsTab({
         {channels.length === 0 ? (
           <Empty text="Нет каналов" />
         ) : (
-          channels.map((channel) => (
-            <Pressable
-              key={channel.id}
-              onPress={() => onOpen(channel.id)}
-              style={({ pressed }) => [styles.row, pressed && { opacity: 0.75 }]}>
-              <View style={styles.hashBox}>
-                <Feather name="hash" size={16} color={colors.muted} />
-              </View>
-              <Text style={styles.rowTitle} numberOfLines={1}>
-                {channel.name}
-              </Text>
-              <Feather name="chevron-right" size={18} color={colors.muted} />
-            </Pressable>
-          ))
+          channels.map((channel) => {
+            const unread = unreadOf(channel.id, channel.unread);
+            return (
+              <Pressable
+                key={channel.id}
+                onPress={() => onOpen(channel.id)}
+                style={({ pressed }) => [
+                  styles.row,
+                  unread > 0 && styles.rowUnread,
+                  pressed && { opacity: 0.75 },
+                ]}>
+                <View style={styles.hashBox}>
+                  <Feather
+                    name="hash"
+                    size={16}
+                    color={unread > 0 ? colors.accent : colors.muted}
+                  />
+                </View>
+                <Text
+                  style={[styles.rowTitle, unread > 0 && styles.rowTitleUnread]}
+                  numberOfLines={1}>
+                  {channel.name}
+                </Text>
+                <UnreadBadge count={unread} />
+                <Feather name="chevron-right" size={18} color={colors.muted} />
+              </Pressable>
+            );
+          })
         )}
       </View>
 
@@ -106,28 +179,38 @@ export function ChatsTab({
         {dms.length === 0 ? (
           <Empty text={'Нет личных сообщений\nНапишите участнику из вкладки «Участники»'} />
         ) : (
-          dms.map((dm) => (
-            <Pressable
-              key={dm.channel.id}
-              onPress={() => onOpen(dm.channel.id)}
-              style={({ pressed }) => [styles.row, pressed && { opacity: 0.75 }]}>
-              <Avatar
-                name={dm.peer.displayName}
-                color={dm.peer.avatarColor}
-                size={36}
-                online={isOnline(dm.peer.id)}
-              />
-              <View style={{ flex: 1 }}>
-                <Text style={styles.rowTitle} numberOfLines={1}>
-                  {dm.peer.displayName}
-                </Text>
-                <Text style={styles.rowMeta} numberOfLines={1}>
-                  @{dm.peer.username} · {isOnline(dm.peer.id) ? 'в сети' : 'не в сети'}
-                </Text>
-              </View>
-              <Feather name="chevron-right" size={18} color={colors.muted} />
-            </Pressable>
-          ))
+          dms.map((dm) => {
+            const unread = unreadOf(dm.channel.id, dm.unread);
+            return (
+              <Pressable
+                key={dm.channel.id}
+                onPress={() => onOpen(dm.channel.id)}
+                style={({ pressed }) => [
+                  styles.row,
+                  unread > 0 && styles.rowUnread,
+                  pressed && { opacity: 0.75 },
+                ]}>
+                <Avatar
+                  name={dm.peer.displayName}
+                  color={dm.peer.avatarColor}
+                  size={36}
+                  online={isOnline(dm.peer.id)}
+                />
+                <View style={{ flex: 1 }}>
+                  <Text
+                    style={[styles.rowTitle, unread > 0 && styles.rowTitleUnread]}
+                    numberOfLines={1}>
+                    {dm.peer.displayName}
+                  </Text>
+                  <Text style={styles.rowMeta} numberOfLines={1}>
+                    @{dm.peer.username} · {isOnline(dm.peer.id) ? 'в сети' : 'не в сети'}
+                  </Text>
+                </View>
+                <UnreadBadge count={unread} />
+                <Feather name="chevron-right" size={18} color={colors.muted} />
+              </Pressable>
+            );
+          })
         )}
       </View>
 
@@ -191,6 +274,9 @@ const styles = StyleSheet.create({
     paddingVertical: 11,
     marginBottom: 8,
   },
+  rowUnread: {
+    borderColor: 'rgba(124,108,246,0.45)',
+  },
   hashBox: {
     width: 36,
     height: 36,
@@ -207,10 +293,28 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '500',
   },
+  rowTitleUnread: {
+    fontWeight: '700',
+    color: colors.text,
+  },
   rowMeta: {
     color: colors.muted,
     fontSize: 12,
     marginTop: 2,
+  },
+  badge: {
+    minWidth: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: colors.accent,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 6,
+  },
+  badgeText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: '700',
   },
   hint: {
     color: colors.muted,

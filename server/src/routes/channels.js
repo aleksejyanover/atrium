@@ -8,6 +8,9 @@ import {
   findMember,
   isChannelMember,
   channelMemberIds,
+  channelUnread,
+  channelReads,
+  touchChannelRead,
 } from '../db.js'
 import { requireAuth } from '../auth.js'
 import { requireChannelAccess } from '../access.js'
@@ -22,6 +25,8 @@ import {
   str,
   rankOf,
 } from '../util.js'
+import { canDeleteAnyMessage } from '../permissions.js'
+import { logActivity, phrases } from '../activity.js'
 
 const router = Router()
 router.use(['/dms', '/channels', '/messages'], requireAuth)
@@ -41,7 +46,7 @@ function userSafe(id) {
 
 // ---------- DMs ----------
 
-// GET /api/dms -> {dms:[{channel, peer:user, org:{id,name}}]}
+// GET /api/dms -> {dms:[{channel, peer:user, org:{id,name}, unread}]}
 router.get('/dms', (req, res, next) => {
   try {
     const rows = all(
@@ -58,6 +63,7 @@ router.get('/dms', (req, res, next) => {
         channel: publicChannel(c),
         peer: userSafe(peers[0]),
         org: org ? { id: org.id, name: org.name } : null,
+        unread: channelUnread(c.id, req.userId),
       }
     })
     res.json({ dms })
@@ -181,7 +187,36 @@ router.get('/channels/:id/messages', (req, res, next) => {
   }
 })
 
-// DELETE /api/messages/:id -> {ok:true} (author or rank >= 60 in message's org)
+// ---------- Read receipts (SPEC v3 §18) ----------
+
+// POST /api/channels/:id/read {at?} -> {ok:true} — last_read_at = max(current, at)
+router.post('/channels/:id/read', (req, res, next) => {
+  try {
+    const { channel } = requireChannelAccess(req.params.id, req.userId)
+    const body = req.body || {}
+    let at = Date.now()
+    if (body.at !== undefined) {
+      at = Number(body.at)
+      if (!Number.isFinite(at) || at <= 0) throw bad('Некорректное время прочтения')
+    }
+    touchChannelRead(channel.id, req.userId, at)
+    res.json({ ok: true })
+  } catch (err) {
+    next(err)
+  }
+})
+
+// GET /api/channels/:id/read-status -> {reads:[{userId, lastReadAt}]} (all participants)
+router.get('/channels/:id/read-status', (req, res, next) => {
+  try {
+    const { channel } = requireChannelAccess(req.params.id, req.userId)
+    res.json({ reads: channelReads(channel.id) })
+  } catch (err) {
+    next(err)
+  }
+})
+
+// DELETE /api/messages/:id -> {ok:true} (author or rank >= 40 — SPEC v3 §19)
 router.delete('/messages/:id', (req, res, next) => {
   try {
     const msg = get('SELECT * FROM messages WHERE id = ?', req.params.id)
@@ -191,12 +226,22 @@ router.delete('/messages/:id', (req, res, next) => {
 
     const member = findMember(channel.org_id, req.userId)
     if (!member) throw forbidden('У вас нет доступа к этому каналу')
-    // author, or rank >= 60 (admin/assistant_owner/owner)
-    if (msg.sender_id !== req.userId && rankOf(member.role) < 60) {
-      throw forbidden('Удалить это сообщение может только его автор или админ')
+    // author, or rank >= 40 (assistant_admin and above, SPEC v3 §19)
+    if (msg.sender_id !== req.userId && !canDeleteAnyMessage(rankOf(member.role))) {
+      throw forbidden('Удалить это сообщение может только его автор или помощник админа и выше')
     }
 
     run('DELETE FROM messages WHERE id = ?', msg.id)
+
+    // SPEC v3 §18: log only staff deletions of other people's messages
+    if (msg.sender_id !== req.userId && rankOf(member.role) >= 40) {
+      const where = channel.type === 'channel' ? `в #${channel.name || 'канал'}` : 'в личной переписке'
+      logActivity(channel.org_id, 'message.deleted', {
+        actorId: req.userId,
+        targetUserId: msg.sender_id,
+        details: phrases.messageDeleted(req.userId, where),
+      })
+    }
     res.json({ ok: true })
   } catch (err) {
     next(err)

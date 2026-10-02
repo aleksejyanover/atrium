@@ -1,4 +1,13 @@
-import type { CallKind, Channel, Invite, Message, Role, User } from '@/lib/types';
+import type {
+  ActivityEntry,
+  CallKind,
+  Channel,
+  ContractDocument,
+  Invite,
+  Message,
+  Role,
+  User,
+} from '@/lib/types';
 
 /** The server may deliver a user either directly or wrapped as `{ user }`. */
 export interface MaybeWrappedUser {
@@ -58,6 +67,35 @@ export interface ServerToClientEvents {
   'member:left': (payload: { orgId: string; userId: string }) => void;
   'role:changed': (payload: { orgId: string; userId: string; role: Role }) => void;
   'channel:created': (payload: { orgId: string; channel: Channel }) => void;
+  /** Кто-то прочитал канал (SPEC v3 §18). */
+  'channel:read': (payload: { channelId: string; userId: string; lastReadAt: number }) => void;
+  /** Новое заявление — staff орг. (rank ≥ 40, SPEC v2 §13). */
+  'application:new': (payload: {
+    application: ContractDocument;
+    org: { id: string; name: string };
+    user: User;
+  }) => void;
+  /** Заявление принято/отклонено/отозвано (SPEC v2 §13). */
+  'application:update': (payload: {
+    application: ContractDocument;
+    org?: { id: string; name: string };
+  }) => void;
+  /** Прислан договор об увольнении — target_user_id (SPEC v2 §13). */
+  'document:new': (payload: { document: ContractDocument; org: { id: string; name: string } }) => void;
+  /** Статус договора об увольнении изменился (SPEC v2 §13). */
+  'document:update': (payload: {
+    document: ContractDocument;
+    org?: { id: string; name: string };
+  }) => void;
+  /** Новая запись истории действий (SPEC v3 §18). */
+  'activity:new': (payload: { activity: ActivityEntry }) => void;
+  /** Баланс кошелька изменился — только владельцу счёта (SPEC v4 §24). */
+  'wallet:updated': (payload: {
+    balance: number;
+    reason?: 'topup' | 'transfer' | 'salary' | 'treasury_deposit';
+    from?: User;
+    amount?: number;
+  }) => void;
   'call:incoming': (payload: {
     callId: string;
     from: MaybeWrappedUser | User;

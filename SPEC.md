@@ -271,3 +271,645 @@ Reuse identical REST + socket protocol from this SPEC. API base URL configurable
 3. `cd mobile && npm i && npx tsc --noEmit` → 0 errors.
 4. Dark-only, minimal, coherent UI everywhere; all copy Russian.
 5. No leftover TODOs in critical paths; no console errors in web during normal flow.
+
+---
+
+# SPEC v2 — Каталог организаций, заявления, договор об увольнении
+
+Всё ниже ДОПОЛНЯЕТ разделы 1–7 (не отменяет). Требование ко всем частям:
+**работать с существующей БД `server/data/atrium.db` без потери данных** —
+миграции только идемпотентные (`CREATE TABLE IF NOT EXISTS`, `ALTER TABLE ... `
+обёрнутый в try/catch, `PRAGMA table_info` проверка колонки). Удалять/пересоздавать
+файл БД ЗАПРЕЩЕНО (там уже есть аккаунты и организации пользователей).
+
+## 10. Новая модель данных
+
+```sql
+ALTER TABLE orgs ADD COLUMN is_public INTEGER DEFAULT 1;   -- публична ли в каталоге
+
+CREATE TABLE IF NOT EXISTS documents (
+  id TEXT PRIMARY KEY,
+  org_id TEXT NOT NULL,
+  type TEXT NOT NULL CHECK(type IN ('join_application','dismissal')),
+  target_user_id TEXT NOT NULL,      -- кто подписывает (заявитель / увольняемый)
+  created_by TEXT NOT NULL,          -- кто инициировал
+  status TEXT NOT NULL CHECK(status IN
+    ('pending','approved','signed','rejected','canceled','terminated')),
+  message TEXT,                      -- комментарий к заявлению / причина увольнения
+  contract_text TEXT NOT NULL,
+  signature TEXT,                    -- data:image/... после подписи
+  signed_name TEXT,
+  signed_at INTEGER,
+  created_at INTEGER NOT NULL,
+  resolved_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS documents_target ON documents(target_user_id, status);
+CREATE INDEX IF NOT EXISTS documents_org ON documents(org_id, type, status);
+```
+
+Статусы:
+- `join_application`: `pending` → `approved` (штат принял, участник создан) | `rejected` (штат отклонил) | `canceled` (заявитель отозвал).
+- `dismissal`: `pending` → `signed` (сотрудник подписал → членство удалено) | `rejected` (сотрудник оспорил, остаётся) | `canceled` (штат отменил, остаётся) | `terminated` (штат расторг в одностороннем порядке → членство удалено).
+
+Старый поток приглашений (`invites`) остаётся как есть (это тоже договор на вступление).
+
+## 11. Тексты договоров
+
+- **Заявление на вступление** (`join_application.contract_text`) — ТОТ ЖЕ шаблон
+  «ДОГОРОР О ПРИСОЕДИНЕНИИ...», что в `invites` (см. раздел 3, единая функция).
+- **Договор об увольнении** (`dismissal.contract_text`), русский, поля заполняются
+  при создании:
+
+```
+ДОГОВОР ОБ УВОЛЬНЕНИИ ИЗ ОРГАНИЗАЦИИ «{orgName}»
+
+Я, нижеподписавшийся(яся) ______________ (ФИО), настоящим подтверждаю
+прекращение моего участия в организации «{orgName}» в роли «{roleLabel}».
+
+Причина: {reason | "по собственному желанию" если инициатор — сам сотрудник,
+         иначе "по инициативе организации"}
+
+1. С моего участия в организация снимаются все обязательства, связанные
+   с доступом к каналам, чатам и звонкам организации.
+2. Доступ к внутренним ресурсам организации прекращается с момента подписи.
+3. Настоящий договор вступает в силу с момента подписи и является окончательным.
+
+Дата: {date}
+Роль: {roleLabel}
+
+Подпись: {изображение подписи добавляется приложением после отрисовки}
+```
+
+## 12. REST API v2 (все — Authorization: Bearer)
+
+### Организации (изменения)
+- `POST /api/orgs` — принимает дополнительно `isPublic?: boolean` (по умолчанию `true`).
+- `PATCH /api/orgs/:id` — принимает `isPublic?` (rank ≥ 60).
+- `GET /api/orgs/:id` — в ответ добавить: `pendingApplications` (count, для rank≥40, иначе 0),
+  в каждый элемент `members[]` поле `dismissalPending?: true` если у участника
+  pending-dismissal документ (видно rank≥40, остальным скрывать).
+
+### Каталог (новое)
+- `GET /api/discover?q=` → `200 {orgs: [{id, name, description, createdAt,
+  membersCount, isMember:boolean, myRole|null}]}`
+  - только `is_public = 1`; до 30 штук, сортировка `membersCount DESC, name ASC`;
+  - `q` — подстрока по name/description (без учёта регистра), без `q` — все.
+  - доступно любому авторизованному пользователю.
+
+### Заявления на вступление (новое, `documents.type='join_application'`)
+- `POST /api/orgs/:id/applications` `{message?, signatureDataUrl, signedName}` → `201 {application}`
+  - доступ: авторизован, НЕ член организации; валидация подписи как в `/invites/:id/accept`
+    (`data:image/` обязателен, `signedName` ≥ 2 символов, `message` ≤ 500);
+  - 409 если уже член / уже pending-заявление / уже pending-приглашение;
+  - `contract_text` шаблон вступления (заполняется на момент создания);
+  - `created_by = target_user_id = applicant`.
+- `GET /api/applications/mine` → `{applications: [{application, org:{id,name,isPublic}}]}`
+  — мои заявления (все статусы, 50 последних, pending сверху).
+- `GET /api/orgs/:id/applications` → `{applications: [{application, user:{...applicant}}]}`
+  — заявления организации, rank ≥ 40 (50 последних, pending сверху); 403 иначе.
+- `POST /api/applications/:id/accept` → `{application}` — rank ≥ 40 в орг.: статус
+  `approved`, создаётся `members` (роль: **`member`** всегда — повышает штат),
+  возвращается 409 если заявление не pending.
+- `POST /api/applications/:id/reject` → `{application}` — rank ≥ 40, только pending.
+- `POST /api/applications/:id/cancel` → `{application}` — только автор заявления, только pending.
+
+### Увольнение (новое, `documents.type='dismissal'`)
+- `POST /api/orgs/:id/dismissals` `{userId, reason?}` → `201 {document}`
+  - доступ: `actor.rank > target.rank`, target ≠ owner; `reason` ≤ 300;
+  - 409 если уже есть pending-dismissal на этого человека или он не член;
+  - `contract_text` из шаблона раздела 11; статус `pending`; **членство НЕ удаляется**.
+- `GET /api/documents/mine` → `{documents: [{document, org:{id,name}, createdBy:{user}}]}`
+  — все документы где `target_user_id = я` (50 последних, pending сверху).
+- `GET /api/orgs/:id/dismissals` → `{documents: [{document, targetUser:{...}, createdBy:{user}}]}`
+  — rank ≥ 40 в орг.
+- `POST /api/documents/:id/sign` `{signatureDataUrl, signedName}` → `{document}`
+  — только target; только pending; в одной транзакции: подпись → `signed` →
+  УДАЛИТЬ членство (как `member:left`); уже не член → 409.
+- `POST /api/documents/:id/reject` → `{document}` — только target, pending;
+  статус `rejected`, членство сохраняется («оспорил»).
+- `POST /api/documents/:id/cancel` → `{document}` — pending; кто-то из: создатель
+  документа ИЛИ `actor.rank > target.rank` в этой орг.; статус `canceled`.
+- `POST /api/documents/:id/terminate` → `{document}` — pending; `actor.rank > target.rank`;
+  статус `terminated` + удаление членства (односторонний разрыв).
+- `DELETE /api/orgs/:id/members/:userId` — **оставить как раньше (мгновенное
+  исключение) только для API-совместимости/smoke-тестов; в UI v2 НЕ ИСПОЛЬЗОВАТЬ**
+  (все «увольнения» идут через dismissal-документы). Самовыход `POST /leave` — как раньше.
+
+### Семантика контракта
+Пользователь подпись = реальная отрисовка (`signatureDataUrl`) + ФИО (`signedName`).
+Все обязательные подписи (принятие заявления, увольнение) — **до** смены статуса.
+
+## 13. Socket.IO v2 (новые события)
+
+- `application:new` `{application, org, user}` → во все сокеты staff орг. (rank ≥ 40).
+- `application:update` `{application, org}` → автору заявления (accept/reject) и
+  staff орг. (cancel).
+- `document:new` `{document, org}` → во все сокеты target_user_id.
+- `document:update` `{document, org}` → target_user_id И staff орг. (все исходы).
+
+Остальные события — без изменений. Аck-конвенция та же.
+
+## 14. Web v2
+
+1. **Каталог** — пункт в левой колонке (иконка globe, под организациями):
+   «Каталог организаций»; строка поиска «Найти организацию» (debounce 300ms);
+   карточки: название, описание, число участников, бейдж «Ваша организация»
+   либо кнопка «Подать заявление».
+2. **Модалка «Подать заявление»**: название орг., textarea «Сообщение (необязательно)»,
+   прокручиваемый текст договора, поле ФИО, signature-pad (переиспользовать
+   существующий компонент), кнопка «Подать заявление» активна только при ФИО ≥2
+   и ≥1 штрихе; после отправки — toast «Заявление отправлено».
+3. **Экран «Заявления»** (иконка в сайдбаре со счётчиком pending, если я член орг.):
+   секция «Входящие заявки» (для каждой моей орг., где rank≥40): аватар+ФИО,
+   организация, сообщение, дата, договор (раскрытие), кнопки «Принять»/«Отклонить»;
+   секция «Мои заявки»: орг., статус (На рассмотрении / Принято / Отклонено /
+   Отозвано), для pending кнопка «Отозвать».
+4. **Экран «Документы»** (иконка со счётчиком моих pending-dismissal):
+   список: организация, тип «Договор об увольнении», статус, дата; для pending —
+   открытие: прокручиваемый текст, ФИО, signature-pad, кнопки «Подписать и
+   уволиться» (danger) и «Оспорить»; история со статусами.
+5. **Создание организации**: добавить тумблер «Публичная организация (видна
+   в каталоге)» — по умолчанию включён. В «Информации» организации (rank≥60) —
+   тот же тумблер.
+6. **Панель участников**: кнопка «Уволить» (danger, вместо «Удалить») → confirm-модалка
+   «Сотруднику будет отправлен договор об увольнении, который он должен подписать
+   от руки» → POST dismissals. Для участника с pending-dismissal: бейдж
+   «Ожидает подписи», кнопки «Отменить увольнение» (cancel) и
+   «Расторгнуть в одностороннем порядке» (terminate, с confirm).
+7. **Реалтайм**: обработать `application:new/update`, `document:new/update`
+   (счётчики сайдбара, тосты «Новое заявление», «Вам отправлен договор
+   об увольнении», обновление списков без перезагрузки).
+8. Новая типизация в `types.ts`, новые вызовы в `api.ts`, всё по-русски,
+   дизайн-токены прежние. `npm run build` — 0 ошибок.
+
+## 15. Mobile v2
+
+Те же функции, те же эндпоинты/события:
+1. На экране выбора организаций — пункт «Каталог организаций» (поиск + карточки +
+   «Подать заявление»).
+2. Экран подачи заявления: сообщение, договор (ScrollView), ФИО, существующий
+   signature-pad (PanResponder/SVG), submit до ФИО+штрихов.
+3. Экран «Заявления» (вкладка внутри организации — входящие для rank≥40; плюс
+   мои заявления в каталоге/на главном экране), кнопки Принять/Отклонить/Отозвать.
+4. Экран «Документы» (список моих договоров, pending → подписание тем же pad,
+   кнопки «Подписать и уволиться» / «Оспорить»).
+5. Тумблер «Публичная» при создании организации; кнопка «Уволить» в участниках
+   (вместо удаления), бейдж «Ожидает подписи», «Отменить» / «Расторгнуть».
+6. Обработка socket-событий v2 (бейджи, тосты).
+7. Гейт: `npx tsc --noEmit` — 0 ошибок.
+
+## 16. Smoke v2 (server/scripts/smoke.mjs — расширить)
+
+Добавить проверки: discover (публичные видны, приватные нет, поиск); заявление
+(валидация подписи 400, дубль 409,非-член ок, член 409, staff видит, accept →
+member создан роль member, повторный accept 409); reject/cancel ветки; dismissal
+(нельзя уволить owner/self/lower rank → 403/409, документ pending, членство цело,
+GET mine/staff, sign → членство удалено, reject → остался, cancel, terminate →
+удалено); ранние проверки не сломать. Итог по-прежнему «SMOKE PASSED», exit 0.
+
+---
+
+# SPEC v2.1 — Профиль с подписью + адаптивность
+
+## 17. Профиль и личная подпись
+
+### Модель (идемпотентные миграции!)
+```sql
+ALTER TABLE users    ADD COLUMN signature TEXT;       -- data:image/... нарисованная подпись
+ALTER TABLE users    ADD COLUMN signature_kind TEXT;  -- 'drawn' | 'text' | NULL (нет подписи)
+ALTER TABLE users    ADD COLUMN signature_text TEXT;  -- текст подписи (kind='text')
+ALTER TABLE invites  ADD COLUMN signature_kind TEXT;  -- 'png' | 'text'
+ALTER TABLE invites  ADD COLUMN signature_text TEXT;
+ALTER TABLE documents ADD COLUMN signature_kind TEXT;
+ALTER TABLE documents ADD COLUMN signature_text TEXT;
+```
+Старые строки с `signature_kind = NULL` трактовать как `'png'` (изображение).
+
+### API профиля
+- `GET /api/me` → user + поля `signature`, `signatureKind`, `signatureText` (только свои).
+- `PUT /api/me` `{displayName?}` (2..50) → `{user}`.
+- `PUT /api/me/signature` — три варианта тела:
+  - `{kind:"text", text}` — text 2..80 символов (trim);
+  - `{kind:"drawn", dataUrl}` — `data:image/...`;
+  - `{kind:null}` — удалить подпись.
+  → `{user}`. Ошибки 400 по валидации.
+- **Подпись любого контракта** (invite accept, создание заявления, sign документа)
+  теперь принимает **ЛИБО** `signatureDataUrl` (`data:image/...`) **ЛИБО**
+  `signatureText` (2..80) — хотя бы одно обязательно, иначе 400
+  «Добавьте подпись». `signedName` (ФИО) по-прежнему обязателен.
+- Во всех ответах о подписанных сущностях (invites, applications, documents)
+  возвращать: `signature` (image|null), `signatureKind` (`'png'|'text'`), `signatureText`,
+  `signedName`, `signedAt` — клиент сам рисует: изображение через `<img>`,
+  текст — шрифтом Caveat (кириллица).
+
+### UI профиля (web + mobile)
+- Вход: клик по аватару/строке пользователя внизу сайдбара (web) / строка профиля
+  на экране выбора организаций (mobile) → экран «Профиль».
+- Содержимое: аватар + отображаемое имя (редактируется, `PUT /api/me`),
+  username (только чтение), email (только чтение), раздел **«Моя подпись»**.
+- Раздел подписи — переключатель **«Напечатать» (по умолчанию)** / **«Нарисовать»**:
+  - *Напечатать*: поле ввода + живое превью шрифтом **Caveat** (подключить с
+    кириллицей: web — Google Fonts `Caveat`, mobile — `@expo-google-fonts/caveat`,
+    если пакет недоступен — локальный ttf через `expo-font`, фолбэк — системный
+    курсив). Подсказка: «Введите имя или фразу — так будет выглядеть ваша подпись».
+  - *Нарисовать*: существующий signature-pad. Подсказка: «Или нарисуйте подпись
+    курсором / пальцем».
+  - Кнопки «Сохранить подпись» и «Удалить подпись».
+- **Подсказка при отсутствии подписи**: баннер «Создайте свою подпись — она
+  понадобится для подписи договоров» + кнопка «Создать подпись» → профиль.
+  Показывать: на экране «Документы», в модалке подачи заявления, в модалке
+  подписи увольнения.
+- **Модалка подписи любого документа**: если подпись уже есть — превью + кнопка
+  **«Подписать моей подписью»** (один клик: text → `signatureText`, drawn →
+  `signatureDataUrl`), плюс ссылка «Подписать иначе» (печат/рисунок inline).
+  ФИО (`signedName`) подставляется из displayName, но остаётся редактируемым.
+- Просмотр подписанных договоров (история): изображение — `<img>`, текст —
+  строкой Caveat 28–36px в цвете акцента под «Подпись:».
+- Никакой конвертации текста в картинку не требуется нигде.
+
+## 18. Адаптивность: телефон и планшет (web)
+
+Один и тот же публичный HTTPS-ссылка открывается в браузере телефона/планшета
+без установки; звонки просят доступ к камере/микрофону обычным промптом (HTTPS есть).
+
+Breakpoints:
+- **< 768px (телефон)** — один столбец:
+  - левая колонка — drawer: кнопка-гамбургер в шапке чата, backdrop-затемнение,
+    закрытие по тапу на backdrop / выборе канала;
+  - правая панель (участники/приглашения/инфо) — полноэкранный оверлей со своей
+    шапкой и крестиком;
+  - шапка чата: гамбургер слева, имя канала по центру/справа, кнопки звонков
+    компактно;
+  - поле ввода прижато к низу с `padding-bottom: env(safe-area-inset-bottom)`,
+    кнопка отправки ≥44px;
+  - инпуты `font-size: 16px` (защита от зума iOS), все tap-targets ≥44px;
+  - модалки: почти во всю ширину, поля/кнопки вертикально; signature-pad
+    `touch-action: none`, рисование пальцем обязательно работает;
+  - сайдбар и панели — `position: fixed`, `100dvh` высота.
+- **768–1099px (планшет/малый ноут)** — сайдбар 260–300px виден, правая панель — overlay-drawer.
+- **≥ 1100px** — текущий трёхколоночный layout без изменений.
+- `index.html` уже имеет viewport + `viewport-fit=cover` + `color-scheme: dark`;
+  добавить safe-area отступы где нужно.
+- Гейт web: `npm run build` зелёный + ручная проверка вёрстки на ширинах
+  390 / 834 / 1440 (dev-server или чтение CSS — по возможности скриншоты).
+- Mobile app (Expo) — уже нативно адаптивна; на планшете допустимо простое
+  масштабирование с макс. шириной контента ~830px по центру.
+
+Приоритет выполнения: сначала бэкенд-часть всех SPEC v2/v2.1 разделов,
+затем UI.
+
+---
+
+# SPEC v3 — Профиль, подпись, прочтено, история, роли, адаптив, звонки
+
+Дополняет всё выше.
+
+## 17. Профиль и сохранённая подпись
+
+### Данные (users — идемпотентная миграция)
+```sql
+ALTER TABLE users ADD COLUMN full_name TEXT;       -- ФИО для договоров
+ALTER TABLE users ADD COLUMN signature TEXT;        -- data:image/... (typed|drawn)
+ALTER TABLE users ADD COLUMN signature_kind TEXT CHECK(signature_kind IN ('typed','drawn'));
+```
+
+### API
+- `GET /api/me` → добавить `fullName`, `signature`, `signatureKind`.
+- `PATCH /api/me` `{displayName?, fullName?, signature?, signatureKind?, email?, currentPassword?}`
+  — `signature` обязателен при указании `signatureKind`; `currentPassword` нужен
+  только при смене пароля (`password` — новое значение, ≥6). 400 на кривые данные.
+
+### Подпись: два вида
+1. **Печатная** (`typed`): пользователь вводит ФИО/подпись текстом («Алексей Иванов»),
+   приложение рисует её курсивным шрифтом (на web: canvas/SVG с шрифтом вроде
+   «Caveat» с Google Fonts; на мобильном: Text в курсиве/шрифте Caveat —
+   подпись = `data:image/svg+xml;base64,...` c текстом), `signatureKind:'typed'`.
+2. **Рукописная** (`drawn`): тот же signature-pad что в договорах.
+
+### UX (web + mobile)
+- Страница «Профиль» (аватар, отображаемое имя, username, email, ФИО, выход).
+- Блок «Моя подпись»: если подписи нет — иллюстрация-заглушка и подсказка
+  «Создайте свою подпись — потом будете подписывать документы в один клик»,
+  две кнопки: «Напечатать подпись» (ввод текста + превью курсивом) и
+  «Нарисовать подпись» (pad). Если есть — превью + «Изменить»/«Удалить».
+- При подписании любого документа (вступление/увольнение): если подпись
+  сохранена — сверху панель «Использовать мою подпись» (один клик: подставляет
+  подпись и ФИО из профиля; ФИО можно поправить) + ссылка «Изменить подпись»;
+  рисование всегда доступно как альтернатива. Если подпись не сохранена —
+  подсказка со ссылкой в профиль («Создайте свою подпись в профиле — подписание
+  займёт один клик»).
+
+## 18. Прочтено и история действий
+
+### Прочтено (read receipts)
+```sql
+CREATE TABLE IF NOT EXISTS channel_reads (
+  channel_id TEXT NOT NULL, user_id TEXT NOT NULL,
+  last_read_at INTEGER NOT NULL, PRIMARY KEY (channel_id, user_id));
+```
+- `POST /api/channels/:id/read` `{at?}` (по умолчанию now) → `{ok:true}` —
+  ставит `last_read_at = max(текущее, at)`; доступ к каналу обязателен.
+- `GET /api/channels/:id/read-status` → `{reads: [{userId, lastReadAt}]}` — все
+  участники (для DM и для каналов).
+- `GET /api/channels/:id/messages` — к каждому сообщению клиента добавляет
+  (клиентская сторона, не сервер): для СВОИХ сообщений — статус прочтения.
+- Сокет `channel:read` `{channelId, userId, lastReadAt}` → другим участникам канала
+  (громкно не спамить: только при открытии канала, при новом входящем сообщении
+  и при прокрутке вниз; клиент шлёт не чаще 1 раза/3с на канал).
+- Отображение: у **своих** сообщений в **DM** — «Прочитано HH:MM» когда peer
+  `lastRead_at ≥ message.createdAt`, иначе «Доставлено» (галочка). В **каналах** —
+  «Прочитано: N из M» (число участников с `lastRead_at ≥ createdAt`; у последнего
+  сообщения). Текст мелким muted-шрифтом под сообщением.
+- Непрочитанные: `GET /api/orgs` и список каналов дополнительно возвращают
+  `unread` (число сообщений с `createdAt > last_read_at` для каналов орг.; для DM —
+  счётчик непрочитанных). **Бейджи** на каналах в сайдбаре (web) и списке чатов
+  (mobile), сброс при открытии. Допустимо считать по-простому (до 100 последних).
+
+### История действий организации (activity log)
+```sql
+CREATE TABLE IF NOT EXISTS activity (
+  id TEXT PRIMARY KEY, org_id TEXT NOT NULL, actor_id TEXT,
+  action TEXT NOT NULL, target_user_id TEXT,
+  details TEXT,            -- человекочитаемая строка готовым текстом на русском
+  created_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS activity_org ON activity(org_id, created_at DESC);
+```
+- `details` формируется сервером сразу фразой, например:
+  «Алексей пригласил(а) Ивана в организацию», «Иван подписал договор о
+  вступлении (роль: Участник)», «Алексей повысил(а) Ивана до Админа»,
+  «Иван подписал договор об увольнении», «Алексей удалил(а) сообщение в #general».
+- События (записывать из существующих обработчиков): `invite.created`,
+  `invite.accepted`, `invite.declined`, `invite.canceled`, `application.submitted`,
+  `application.approved`, `application.rejected`, `application.canceled`,
+  `dismissal.created`, `dismissal.signed`, `dismissal.rejected`, `dismissal.canceled`,
+  `dismissal.terminated`, `member.joined`, `member.left`, `role.changed`,
+  `channel.created`, `org.updated`, `message.deleted` (только для rank≥40,
+  не для автора — иначе не пишем).
+- `GET /api/orgs/:id/activity?before=<id>&limit=50` → `{activity:[{id, action,
+  details, actor:{...}|null, targetUser:{...}|null, createdAt}], hasMore}`
+  — доступно всем членам организации.
+- Сокет `activity:new` `{activity}` → членам организации (realtime-таймлайн).
+
+## 19. Роли — уточнённая матрица (заменяет §2 в части прав)
+
+| Действие | owner | assistant_owner | admin | assistant_admin | member |
+|---|---|---|---|---|---|
+| Приглашать | ✓ | ✓ | ✓ | ✓ | — |
+| Принимать/отклонять заявления | ✓ | ✓ | ✓ | ✓ | — |
+| Создавать каналы | ✓ | ✓ | ✓ | ✓ | — |
+| **Удалять сообщения** (любые, не свои) | ✓ | ✓ | ✓ | **✓ (новое)** | — |
+| Увольнять (dismissal, rank<своей) | ✓ | ✓ | ✓ | — | — |
+| Односторонний разрыв (terminate) | ✓ | ✓ | ✓ | — | — |
+| Менять роли (owner: любые кроме owner; иначе rank > цели и новая < своей) | ✓ | ✓ | ✓ (только ниже admin) | — | — |
+| Редактировать организацию, публичность | ✓ | ✓ | ✓ | — | — |
+| Просмотр заявок/увольнений орг. | ✓ | ✓ | ✓ | ✓ | — |
+| Просмотр истории действий | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Чаты, звонки, каталог, подача заявлений | ✓ | ✓ | ✓ | ✓ | ✓ |
+
+- Изменения smoke: удаление сообщения rank≥40 (assistant_admin может, member нет).
+- В панели организации (web) и на мобильном — раздел **«Роли и права»**:
+  таблица выше (тёмный минимализм), чтобы каждый видел возможности своей роли.
+
+## 20. Адаптив: телефон и планшет (web)
+
+Один и тот же публичный URL должен быть полностью удобен на телефоне и планшете.
+
+- **< 768px (телефон)**: колонки-сайдбара нет — вместо неё «гамбургер»
+  (иконка в шапке чата) открывает сайдбар **оверлеем** (выезжает слева,
+  затемнение-бэкдроп, закрытие тапом по бэкдропу/крестику). Правая панель —
+  полноэкранный оверлей со своим крестиком. Чат на всю ширину. Поле ввода
+  прижато к низу с учётом `env(safe-area-inset-bottom)`; кнопки и тапы ≥ 44px;
+  шрифт в инпутах ≥16px (иначе iOS зумит); модалки — во всю ширину с отступами
+  (не шире 92vw), signature-pad ресайзится и имеет `touch-action:none`.
+- **768–1100px (планшет portrait)**: сайдбар постоянный ~260px, правая панель —
+  оверлей. **> 1100px**: текущая 3-колоночная раскладка.
+- Вызовы-кнопки в шапке чата, индикатор набора, попапы не должны обрезаться;
+  видео-звонок: удалённое видео на весь экран, локальное — pip с учётом safe-area.
+- Проверить экраны: логин/регистрация, каталог, документы (pad!), чат (длинные
+  сообщения, даты), участники, звонок.
+- Гейт: `npm run build` зелёный; вёрстка проверена на ширинах 390 / 768 / 1440
+  (насколько возможно в этой среде — вёрстка через CSS-медиазапросы, без JS-хаков).
+
+## 21. Починка звонков (веб — приоритет)
+
+Симптом: у пользователя звонки «не работают» (тест с двух аккаунтов в разных
+сетях). Диагноз: `ICE_SERVERS` — только `stun:stun.l.google.com:19302`
+(в РФ часто блокируется), нет TURN → ICE не проходит между разными сетями.
+
+1. В `web/src/hooks/useWebRTC.ts` заменить ICE-серверы:
+```ts
+const ICE_SERVERS: RTCIceServer[] = [
+  { urls: ['stun:stun.cloudflare.com:3478', 'stun:stun.voipgate.com:3478',
+           'stun:stun.sipgate.net:3478', 'stun:stun.l.google.com:19302'] },
+  { urls: ['turn:openrelay.metered.ca:80', 'turn:openrelay.metered.ca:443',
+           'turn:openrelay.metered.ca:443?tcp'],
+    username: 'openrelayproject', credential: 'openrelayproject' },
+];
+```
+2. Следить за `iceConnectionState`/`connectionState`: через 20с в состоянии
+   connecting/без `connected` → показать понятную ошибку «Не удалось установить
+   соединение. Проверьте интернет у собеседника» и завершить вызов (кнопкой
+   «Завершить»), при `failed` — то же. При `disconnected` — статус «Соединение
+   нестабильно».
+3. Никогда не оставлять пользователя в вечном «Вызов…»: если `call:invite`
+   не подтверждён за 12с (emitAck и так таймаутит) — сообщение и сброс.
+4. Логгировать на сервере вызовы (`console.log('[call]', action, ...)` в
+   call:* хендлерах) — для диагностики.
+5. То же самое ICE-набор — в мобильном приложении (`state/call.ts`).
+6. Smoke: сигнальный хендшейк остаётся (уже есть).
+
+## 22. Smoke v3
+
+Расширить `server/scripts/smoke.mjs`: PATCH /me (профиль+подпись), оба вида
+подписи в договоре через сохранённую подпись (приём: accept с `signature`
+из профиля допустим — НЕТ: контракт всё равно подписывается полем
+`signatureDataUrl`; проверить можно только API-валидацию), read-status/read/
+unread, activity (создание заявления → запись в истории, GET activity),
+новая матрица прав (assistant_admin удаляет сообщение — 200, member — 403),
+discover/is_public. Итог «SMOKE PASSED», exit 0. Существующие проверки не ломать.
+
+---
+
+# SPEC v4 — Панель создателя с ботом + финансы и зарплата
+
+## 23. Панель создателя (только для владельца приложения)
+
+### Доступ
+- Superadmin = пользователь, чей `username` входит в список:
+  `process.env.ATRIUM_ADMIN?.split(',').map(s=>s.trim()) || ['alex']`.
+- Любой роутер `/api/admin/*` под `requireAuth + requireAdmin`; иначе 403
+  «Доступ запрещён». Клиент прячет весь UI, если `GET /api/me` не вернул
+  `isAdmin: true` (поле добавить в ответ `/api/me` и в объект user — вычислять
+  на сервере, не принимать от клиента).
+
+### Данные (идемпотентные миграции)
+```sql
+ALTER TABLE users ADD COLUMN banned INTEGER DEFAULT 0;
+ALTER TABLE users ADD COLUMN last_login_at INTEGER;
+CREATE TABLE IF NOT EXISTS login_log (
+  id TEXT PRIMARY KEY, user_id TEXT, success INTEGER NOT NULL,
+  ip TEXT, user_agent TEXT, created_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS audit_log (
+  id TEXT PRIMARY KEY, org_id TEXT, actor_id TEXT, action TEXT NOT NULL,
+  target_user_id TEXT, details TEXT, ip TEXT, user_agent TEXT,
+  created_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS audit_created ON audit_log(created_at DESC);
+CREATE TABLE IF NOT EXISTS admin_settings (key TEXT PRIMARY KEY, value TEXT);
+```
+- `audit_log` пишется ПАРАЛЛЕЛЬНО `activity` (§18) из всех тех же обработчиков
+  (те же details-фразы) + события авторизации и кошелька:
+  `auth.login` (в т.ч. неудачные: details «Неудачный вход»), `auth.logout`,
+  `auth.register`, `wallet.topup`, `wallet.transfer`, `org.payroll`,
+  `user.ban`, `user.unban`.
+- Каждый запрос superadmin-роутов и логинов пишет `ip` + `user_agent`
+  (из `req.ip` / header; за туннелем — `X-Forwarded-For` если есть).
+
+### Бот-отчётчик
+- Системный пользователь `id:'u_bot'`, `username:'atrium_bot'`,
+  displayName «Atrium Бот», фиксированный avatarColor, создаётся лениво
+  при первом отчёте (паролю не нужен, в каталоге не виден, залогиниться нельзя).
+- Бот отправляет superadmin'у ЛС (DM-канал bot↔admin без org_id, создаётся
+  лениво) сообщения-отчёты текстом: «🔴 Вход: alex_123 (IP 1.2.3.4) в 14:32»,
+  «📨 Заявление: Иван → ООО «Ромашка»», «💸 Зарплата: 50 000 ₽ → Иван (org «папа»)».
+  Отправляется через существующий механизм `message:new` (уведомления как обычно).
+- Настройки бота: `GET /api/admin/bot` → `{enabled, events:[...]}`,
+  `PUT /api/admin/bot` `{enabled?, events?}` — хранение: `admin_settings.key='bot'`
+  (JSON). Каталог событий (для чекбоксов в UI): `auth.login`, `auth.logout`,
+  `auth.register`, `org.create`, `member.joined`, `member.left`, `role.changed`,
+  `invite.created`, `application.*`, `dismissal.*`, `message.deleted`,
+  `wallet.topup`, `wallet.transfer`, `org.payroll`, `user.ban`.
+  По умолчанию `enabled:true`, `events` = все.
+- **Дедупликация**: одинаковые события одного типа по одному пользователю
+  складываются в одну сводку в течение 60с («Вход: alex ×3 за минуту»).
+
+### Эндпоинты
+- `GET /api/admin/stats` → `{users, usersToday, usersActive24h, orgs, orgsPublic,
+  members, messages, messages24h, invitesPending, callsToday (по login/activity
+  не надо — считать из audit/call-логов если легко, иначе 0), onlineNow,
+  totalBalance (сумма балансов), paidTotal (сумма salary-платежей)}`
+- `GET /api/admin/audit?before=<id>&limit=50&action=<filter>&q=<поиск>` →
+  `{items:[{id, action, details, actor:{...}|null, targetUser:{...}|null,
+  orgName|null, ip, createdAt}], hasMore}` — все организации, глобально.
+- `GET /api/admin/logins?limit=50` → `{items:[{id, user:{...}|null, success,
+  ip, userAgent, createdAt}]}`
+- `GET /api/admin/users?query=&limit=30` → `{items:[{...user, banned, lastLoginAt,
+  orgsCount, balance}]}`
+- `POST /api/admin/users/:id/ban` / `POST /api/admin/users/:id/unban` →
+  ставит/снимает `banned`; активные сокеты этого пользователя отключаются
+  (и повторный вход невозможен: login → 403 «Аккаунт заблокирован»;
+  `requireAuth` тоже проверяет banned → 401 с сообщением).
+- Сокет `admin:event` `{item}` → ТОЛЬКО сокетам superadmin (live-лента журнала).
+
+### UI (web, раздел «Панель создателя», вход из профиля и сайдбара — виден только admin)
+- **Обзор**: карточки статистики (пользователи/онлайн/организации/сообщения
+  за 24ч/балансы/выплачено).
+- **Журнал**: live-лента `admin:event` + пагинация, фильтр по типу, поиск;
+  каждая строка: время, актор, действие, детали, IP.
+- **Входы**: таблица входов (кто, когда, IP, устройство, успех/нет).
+- **Пользователи**: поиск, баланс, число организаций, бан/разбан.
+- **Бот**: переключатель вкл/выкл + чекбоксы событий; превью «как будет
+  выглядеть отчёт»; ссылка «Открыть чат с ботом» (DM).
+
+## 24. Финансы: кошелёк, переводы, зарплата (общая функция приложения)
+
+> ⚠️ **Демо-режим**: реальные платежи НЕ проводятся (нет договора с эквайрингом).
+> Везде в UI — плашка «Демо-режим: карта не списывается, реальные деньги
+> не участвуют». Интеграция с ЮKassa/Stripe — отдельная задача после подключения.
+
+### Данные
+```sql
+ALTER TABLE users ADD COLUMN balance INTEGER DEFAULT 0;   -- рублей, целые
+ALTER TABLE orgs  ADD COLUMN balance INTEGER DEFAULT 0;    -- казначейство организации
+CREATE TABLE IF NOT EXISTS payments (
+  id TEXT PRIMARY KEY, org_id TEXT, from_user_id TEXT, to_user_id TEXT,
+  kind TEXT NOT NULL CHECK(kind IN ('topup','transfer','salary','treasury_deposit')),
+  amount INTEGER NOT NULL CHECK(amount > 0), note TEXT, card_mask TEXT,
+  created_by TEXT, created_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS payments_user ON payments(to_user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS payments_org ON payments(org_id, created_at DESC);
+```
+Все изменения балансов — **в одной транзакции** (begin/commit), отрицательный
+баланс невозможен (409 «Недостаточно средств»).
+
+### Эндпоинты
+- `GET /api/wallet` → `{balance, demo:true, payments:[{id, kind, amount(+/-),
+  direction:'in'|'out', counterparty:{user}|{org}, note, cardMask, createdAt}]}`
+  — 30 последних операций пользователя (и как получатель, и как отправитель).
+- `POST /api/wallet/topup` `{amount, cardNumber}` → `{balance, payment, demo:true}`
+  - amount 100..500000; cardNumber — 16 цифр (пробелы/дефисы убрать, валидация
+    Luhn опционально, мягко); `card_mask = '•••• ' + последние4`; kind `topup`;
+    audit `wallet.topup`.
+- `POST /api/wallet/transfer` `{toUserId, amount, note?}` → `{balance, payment}`
+  - amount 1..500000; себе → 400; не найден → 404; нет средств → 409;
+    kind `transfer`; audit `wallet.transfer`; получателю тост
+    «💸 Перевод: +N ₽ от Имя» (сокет `wallet:updated` + toast).
+- `GET /api/orgs/:id/finance` → `{balance, canManage:boolean,
+  transactions:[{...payment, fromUser, toUser, createdAt}] (50, rank≥60 — всё
+  казначейство; обычный участник только свои начисления этой орг.),
+  payrollTotals:[{user, total}] (rank≥60)}`
+- `POST /api/orgs/:id/treasury/deposit` `{amount}` → `{balance}` — rank ≥ 60;
+  списывает с личного баланса автора (недостаточно → 409), kind
+  `treasury_deposit` (from_user=автор, to=NULL, org_id=орг); audit `org.payroll`
+  нет — отдельный `wallet.topup`? → action `org.treasury_deposit`.
+- `POST /api/orgs/:id/payroll` `{userId, amount, note?}` → `{orgBalance, payment}` 
+  - rank ≥ 60; цель — член орг.; `org.balance >= amount` иначе 409
+    «Недостаточно средств в казначестве»; `users.balance += amount`,
+    `orgs.balance -= amount`; kind `salary`; audit `org.payroll`;
+    activity-запись «Алексей выплатил(а) зарплату: 50 000 ₽ → Иван»;
+    получателю `wallet:updated` + тост «💸 Начислена зарплата: +50 000 ₽».
+
+### Сокеты
+- `wallet:updated` `{balance, reason?, from?}` → только владельцу счёта.
+
+### UI (web + mobile, все тексты по-русски)
+- **«Кошелёк»** (в профиле + пункт в сайдбаре): баланс крупно («12 500 ₽»),
+  кнопки «Пополнить» и «Перевести», история операций (значок, контрагент,
+  комментарий, время, ±сумма; для topup — маска карты и бейдж «Демо»).
+- **Модалка пополнения**: сумма (быстрые чипы 500/1000/5000), номер карты
+  (маска ввода 0000 0000 0000 0000), плашка «Демо-режим…», кнопка «Пополнить».
+- **Модалка перевода**: поиск пользователей (GET /api/users/search), сумма,
+  комментарий, итог, кнопка «Перевести»; успех → тост.
+- **«Финансы организации»** (в правой панели, rank≥60): казначейство, кнопки
+  «Пополнить казначейство» (сумма, списывается с автора) и «Выплатить зарплату»
+  (выбор участника, сумма, комментарий), история операций, колонка
+  «Выплачено» на участника. Обычный участник видит только раздел
+  «Мои начисления» от этой организации.
+- Всюду подписи «Демо-режим».
+
+## 25. Общее
+
+- `GET /api/me` добавить `isAdmin`, `balance`.
+- Новые события realtime: `admin:event`, `wallet:updated`.
+- Smoke v4: admin-роуты (403 для не-создателя, 200 stats/audit/logins/users,
+  ban → login 401/403, unban → ок), wallet-цепочка (topup → transfer → нет
+  средств 409 → deposit в казначейство → payroll списывает ровно, балансы
+  сходятся), bot-настройки GET/PUT, DM бота создаётся и сообщение приходит.
+  Итог «SMOKE PASSED», exit 0; все прежние проверки остаются зелёными.
+
+---
+
+## 26. РЕШЕНИЕ КОНФЛИКТОВ (читать обязательно, имеет приоритет)
+
+В SPEC появились два разных описания профиля/подписи («SPEC v2.1 §17» и
+«SPEC v3 §17»). Единая истина:
+
+1. **Модель подписи — по v2.1 §17** (более полная):
+   - `users.signature` (data:image только для нарисованной),
+     `users.signature_text` (для текстовой), `users.signature_kind ∈ {'text','drawn'}` (NULL = подписи нет);
+   - в подписанных сущностях (invites/applications/documents):
+     `signature_kind ∈ {'png','text'}` (старые NULL → `'png'`), `signature_text` для текстовых.
+2. **Сервер принимает ВСЕ варианты сохранения профиля** (толерантность):
+   - `PUT /api/me/signature` `{kind:'text', text}` | `{kind:'drawn', dataUrl}` | `{kind:null}` — обязательный канон (v2.1);
+   - `PATCH /api/me` и `PUT /api/me` `{displayName?, fullName?, email?, password?, currentPassword?}` — оба метода как алиасы;
+   - при сохранении `signatureKind:'typed'` трактовать как `'text'`.
+3. **Подпись договора** принимает ЛИБО `signatureDataUrl` (`data:image/...`),
+   ЛИБО `signatureText` (2..80) — хотя бы одно обязательно; `signedName` обязателен.
+   Клиент (web/mobile) при «напечатанной» подписи шлёт `signatureText`, при
+   нарисованной — `signatureDataUrl`. Конвертация текста в картинку НЕ используется.
+4. `fullName` — опциональное поле (если реализовано, префилл ФИО, иначе displayName).
+5. **Разделы без конфликтов остаются в силе**: v2 §10–16, v2.1 §18 (адаптив,
+   дублирует v3 §20 — при расхождениях собирать объединённую/более строгую
+   версию), v3 §18 (прочтено/история), v3 §19 (роли), v3 §21 (починка звонков —
+   приоритет), v4 §23–25 (панель создателя, финансы).
+6. Нумерация секций может дублироваться (17/18) — ориентироваться на заголовки
+   версий `# SPEC v2 / v2.1 / v3 / v4` и этот раздел.

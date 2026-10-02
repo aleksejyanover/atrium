@@ -1,5 +1,5 @@
 import { Router } from 'express'
-import { all } from '../db.js'
+import { all, BOT_ID } from '../db.js'
 import { requireAuth } from '../auth.js'
 import { publicUser } from '../util.js'
 
@@ -13,6 +13,7 @@ router.get('/users/search', requireAuth, (req, res, next) => {
     const needle = q.toLowerCase()
     // SQLite LIKE is case-sensitive for non-ASCII, so filter in JS (small scale)
     const rows = all('SELECT * FROM users')
+      .filter((r) => r.id !== BOT_ID) // system bot is not listed (SPEC v4 §23)
       .filter(
         (r) =>
           r.username.toLowerCase().includes(needle) ||

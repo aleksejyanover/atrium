@@ -2,14 +2,15 @@ import { Router } from 'express'
 import { run, get, all, findUserById, findOrg, findMember } from '../db.js'
 import { requireAuth } from '../auth.js'
 import {
-  bad,
   conflict,
   forbidden,
   notFound,
-  str,
+  contractSignature,
+  requireSignedName,
 } from '../util.js'
 import { canCancelInvite } from '../permissions.js'
 import { emitToOrg } from '../bus.js'
+import { logActivity, phrases } from '../activity.js'
 import { inviteDto } from './orgs.js'
 
 const router = Router()
@@ -52,24 +53,21 @@ function publicUserSafe(id) {
   }
 }
 
-// POST /api/invites/:id/accept {signatureDataUrl, signedName} -> {org, role}
+// POST /api/invites/:id/accept {signatureDataUrl | signatureText, signedName} -> {org, role}
+// SPEC v2.1 §17: EITHER a drawn image (data:image/...) OR a typed signatureText is accepted.
 router.post('/invites/:id/accept', (req, res, next) => {
   try {
     const invite = requireInvite(req.params.id)
     if (invite.invitee_id !== req.userId) throw forbidden('Приглашение адресовано другому пользователю')
     if (invite.status !== 'pending') throw conflict('Приглашение уже неактивно')
 
-    const signatureDataUrl = typeof req.body?.signatureDataUrl === 'string' ? req.body.signatureDataUrl.trim() : ''
-    const signedName = str(req.body?.signedName)
-    if (!signatureDataUrl || !signatureDataUrl.startsWith('data:image/')) {
-      throw bad('Подпись обязательна (data:image/...)')
-    }
-    if (!signedName || signedName.length < 2) throw bad('Укажите ФИО (не менее 2 символов)')
+    const sig = contractSignature(req.body)
+    const signedName = requireSignedName(req.body)
 
     const signedAt = Date.now()
     run(
-      "UPDATE invites SET status = 'accepted', signature = ?, signed_name = ?, signed_at = ? WHERE id = ?",
-      signatureDataUrl, signedName, signedAt, invite.id
+      "UPDATE invites SET status = 'accepted', signature = ?, signature_kind = ?, signature_text = ?, signed_name = ?, signed_at = ? WHERE id = ?",
+      sig.signature, sig.signatureKind, sig.signatureText, signedName, signedAt, invite.id
     )
 
     // create membership (idempotent)
@@ -91,10 +89,21 @@ router.post('/invites/:id/accept', (req, res, next) => {
       createdAt: orgRow.created_at,
       membersCount: get('SELECT COUNT(*) AS c FROM members WHERE org_id = ?', orgRow.id).c,
       channelsCount: get("SELECT COUNT(*) AS c FROM channels WHERE org_id = ? AND type = 'channel'", orgRow.id).c,
+      isPublic: orgRow.is_public === undefined || orgRow.is_public === null ? true : !!orgRow.is_public,
     }
 
     const user = publicUserSafe(req.userId)
     emitToOrg(invite.org_id, 'member:joined', { orgId: invite.org_id, user, role: invite.role })
+    logActivity(invite.org_id, 'invite.accepted', {
+      actorId: req.userId,
+      targetUserId: req.userId,
+      details: phrases.inviteAccepted(req.userId, invite.role),
+    })
+    logActivity(invite.org_id, 'member.joined', {
+      actorId: req.userId,
+      targetUserId: req.userId,
+      details: phrases.memberJoined(req.userId),
+    })
 
     res.json({ org, role: invite.role })
   } catch (err) {
@@ -109,6 +118,11 @@ router.post('/invites/:id/decline', (req, res, next) => {
     if (invite.invitee_id !== req.userId) throw forbidden('Приглашение адресовано другому пользователю')
     if (invite.status !== 'pending') throw conflict('Приглашение уже неактивно')
     run("UPDATE invites SET status = 'rejected' WHERE id = ?", invite.id)
+    logActivity(invite.org_id, 'invite.declined', {
+      actorId: req.userId,
+      targetUserId: req.userId,
+      details: phrases.inviteDeclined(req.userId),
+    })
     res.json({ ok: true })
   } catch (err) {
     next(err)
@@ -126,6 +140,11 @@ router.delete('/invites/:id', (req, res, next) => {
     canCancelInvite({ userId: req.userId, role: member.role }, invite)
 
     run("UPDATE invites SET status = 'canceled' WHERE id = ?", invite.id)
+    logActivity(invite.org_id, 'invite.canceled', {
+      actorId: req.userId,
+      targetUserId: invite.invitee_id,
+      details: phrases.inviteCanceled(req.userId, invite.invitee_id),
+    })
     res.json({ ok: true })
   } catch (err) {
     next(err)

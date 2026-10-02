@@ -1,5 +1,5 @@
 /**
- * Permission matrix helpers (SPEC §2).
+ * Permission matrix helpers (SPEC §2, updated by SPEC v3 §19).
  * actor = acting member row {role}, target = another member row {role}.
  */
 import { rankOf, forbidden, conflict } from './util.js'
@@ -8,7 +8,13 @@ export const canInvite = (actorRank) => actorRank >= 40
 export const canCreateChannel = (actorRank) => actorRank >= 40
 export const canEditOrg = (actorRank) => actorRank >= 60
 export const canViewInvites = (actorRank) => actorRank >= 40
-export const canDeleteAnyMessage = (actorRank) => actorRank >= 60
+// SPEC v3 §19: assistant_admin (rank ≥ 40) may delete other people's messages
+export const canDeleteAnyMessage = (actorRank) => actorRank >= 40
+// SPEC v3 §19: dismissals (create) & one-sided termination — admin and above
+export const canDismiss = (actorRank) => actorRank >= 60
+export const canTerminate = (actorRank) => actorRank >= 60
+// applications staff side (§12: rank ≥ 40)
+export const canReviewApplications = (actorRank) => actorRank >= 40
 
 /** Change role of target: owner → any target except owner;
  *  otherwise actor.rank > target.rank AND newRole.rank < actor.rank. */

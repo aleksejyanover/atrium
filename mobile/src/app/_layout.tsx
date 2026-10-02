@@ -1,4 +1,6 @@
+import { Caveat_400Regular } from '@expo-google-fonts/caveat';
 import { DarkTheme, Stack, ThemeProvider } from 'expo-router';
+import { useFonts } from 'expo-font';
 import { StatusBar } from 'expo-status-bar';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
@@ -8,6 +10,7 @@ import { colors } from '@/lib/theme';
 import { AuthProvider } from '@/state/auth';
 import { CallProvider } from '@/state/call';
 import { OrgsProvider } from '@/state/orgs';
+import { RealtimeProvider } from '@/state/realtime';
 import { SocketProvider } from '@/state/socket';
 import { ToastProvider } from '@/state/toast';
 
@@ -25,6 +28,9 @@ const theme = {
 };
 
 export default function RootLayout() {
+  // Caveat — шрифт печатной подписи (SPEC v2.1/v3 §17)
+  useFonts({ Caveat_400Regular });
+
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <SafeAreaProvider>
@@ -33,17 +39,19 @@ export default function RootLayout() {
             <SocketProvider>
               <OrgsProvider>
                 <ToastProvider>
-                  <CallProvider>
-                    <StatusBar style="light" />
-                    <Stack
-                      screenOptions={{
-                        headerShown: false,
-                        contentStyle: { backgroundColor: colors.bg },
-                        animation: 'slide_from_right',
-                      }}
-                    />
-                    <CallOverlays />
-                  </CallProvider>
+                  <RealtimeProvider>
+                    <CallProvider>
+                      <StatusBar style="light" />
+                      <Stack
+                        screenOptions={{
+                          headerShown: false,
+                          contentStyle: { backgroundColor: colors.bg },
+                          animation: 'slide_from_right',
+                        }}
+                      />
+                      <CallOverlays />
+                    </CallProvider>
+                  </RealtimeProvider>
                 </ToastProvider>
               </OrgsProvider>
             </SocketProvider>
