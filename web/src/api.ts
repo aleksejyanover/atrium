@@ -5,7 +5,7 @@
  * - automatic logout (token drop + redirect) on 401 of an authed request
  */
 
-import { apiUrl } from './config';
+import { apiUrl, loginUrl } from './config';
 import type {
   ActivityEntry,
   AdminStats,
@@ -82,8 +82,8 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   // Auto-logout: only for requests that carried a token and were not auth attempts.
   if (res.status === 401 && token && !path.startsWith('/api/auth/')) {
     clearToken();
-    if (window.location.pathname !== '/login') {
-      window.location.assign('/login');
+    if (!window.location.hash.startsWith('#/login')) {
+      window.location.assign(loginUrl());
     }
     fail('Сессия истекла, войдите заново', 401);
   }

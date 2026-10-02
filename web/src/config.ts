@@ -14,3 +14,14 @@ export const API_ORIGIN: string =
 
 /** Prefix a same-origin API path (`/api/...`) with the runtime API origin. */
 export const apiUrl = (path: string): string => API_ORIGIN + path;
+
+/**
+ * Absolute URL of the login screen for hard navigations (session expiry,
+ * logout). Built from the current location so it works both on the Node
+ * server (`/…`) and on a static host with a sub-path (GitHub Pages `/atrium/`),
+ * where the hash router keeps routes after `#`.
+ */
+export const loginUrl = (): string =>
+  typeof window !== 'undefined'
+    ? `${window.location.origin}${window.location.pathname}#/login`
+    : '/#/login';

@@ -9,6 +9,7 @@ import {
 } from 'react';
 import type { Socket } from 'socket.io-client';
 import { api, ApiError, clearToken, getToken } from './api';
+import { loginUrl } from './config';
 import { connectSocket, disconnectSocket } from './socket';
 import {
   roleRank,
@@ -155,7 +156,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     clearToken();
     disconnectSocket();
     localStorage.removeItem(LAST_ORG_KEY);
-    window.location.assign('/login');
+    window.location.assign(loginUrl());
   }, []);
 
   /* ---------------- data loaders ---------------- */
