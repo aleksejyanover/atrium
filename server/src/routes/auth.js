@@ -4,6 +4,7 @@ import {
   findUserById,
   findUserByUsername,
   findUserByEmail,
+  ensureOwnerCard,
   run,
   get,
 } from '../db.js'
@@ -185,7 +186,8 @@ router.post('/auth/logout', requireAuth, (req, res, next) => {
 })
 
 // GET /api/me -> {user} (SPEC v3 §17: + fullName, signature…; SPEC v4 §25: + isAdmin, balance;
-// SPEC v5 §29: + isOwner, balance = null for the card owner meaning ∞)
+// SPEC v5 §29: + isOwner; SPEC v6 §32: plain numeric balance for the owner + card {number,pin}
+// for the card owner ONLY — no other response ever exposes a card)
 router.get('/me', requireAuth, (req, res) => {
   const user = meUser(findUserById(req.userId))
   res.json({ user, isAdmin: user.isAdmin, isOwner: user.isOwner, balance: user.balance })
@@ -193,6 +195,8 @@ router.get('/me', requireAuth, (req, res) => {
 
 // POST /api/owner/claim {code} -> {ok:true, isOwner:true} | {ok:true, already:true} (SPEC v5 §29)
 // Code: process.env.ATRIUM_OWNER_CODE || 'OWNER-ATRIUM-777' (trimmed, case-insensitive).
+// SPEC v6 §32: the card (16-digit number + 4-digit PIN) is generated here for the
+// newly activated owner (legacy owners are back-filled lazily at server start).
 router.post('/owner/claim', requireAuth, (req, res, next) => {
   try {
     const code = str(req.body?.code) ?? ''
@@ -200,9 +204,13 @@ router.post('/owner/claim', requireAuth, (req, res, next) => {
     if (!code || code.toLowerCase() !== expected.toLowerCase()) throw bad('Неверный код')
 
     const row = findUserById(req.userId)
-    if (row.is_owner) return res.json({ ok: true, already: true, isOwner: true })
+    if (row.is_owner) {
+      ensureOwnerCard(row) // defensive: credentials may be missing on a legacy row
+      return res.json({ ok: true, already: true, isOwner: true })
+    }
 
     run('UPDATE users SET is_owner = 1 WHERE id = ?', row.id)
+    ensureOwnerCard(findUserById(row.id)) // SPEC v6 §32: card number + PIN for the new owner
     logAudit({
       actorId: row.id,
       action: 'owner.claim',

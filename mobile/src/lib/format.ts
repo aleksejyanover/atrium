@@ -72,10 +72,15 @@ export function formatCardNumber(digits: string): string {
   return only.replace(/(\d{4})(?=\d)/g, '$1 ');
 }
 
-/** Баланс: у владельца — «∞» (isOwner / balance === null), иначе «12 500 ₽» (SPEC v5 §29–30). */
-export function formatBalance(value: number | null | undefined, isOwner?: boolean): string {
-  if (isOwner || value === null) return '∞';
+/** Баланс — обычное число рублей, у владельца тоже (SPEC v6 §32). */
+export function formatBalance(value: number | null | undefined): string {
   return rub(value ?? 0);
+}
+
+/** Маска номера карты: «•••• •••• •••• 1234» (SPEC v6 §32). */
+export function maskCardNumber(number: string): string {
+  const only = number.replace(/\D/g, '');
+  return only ? `•••• •••• •••• ${only.slice(-4)}` : '•••• •••• •••• ••••';
 }
 
 /** Детерминированный серийный номер карточки владельца: OWNER-XXXX от id (SPEC v5 §30). */

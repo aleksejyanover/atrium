@@ -1,4 +1,4 @@
-/** «Кошелёк»: баланс, пополнение счёта, переводы и история операций (SPEC v4 §24, v5 §30). */
+/** «Кошелёк»: баланс, пополнение счёта, переводы и история операций (SPEC v4 §24, v5 §30, v6 §32). */
 
 import { useCallback, useEffect, useState } from 'react';
 import { api, ApiError } from '../api';
@@ -65,11 +65,14 @@ export function TopupModal({
   onDone,
 }: {
   onClose: () => void;
-  onDone: (balance: number | null) => void;
+  onDone: (balance: number) => void;
 }) {
-  const { toast } = useApp();
+  const { toast, user } = useApp();
+  // SPEC v6 §32: у владельца свой пароль карты и снят верхний лимит суммы
+  const isOwner = user?.isOwner === true;
   const [amount, setAmount] = useState('');
   const [card, setCard] = useState('');
+  const [pin, setPin] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -77,22 +80,31 @@ export function TopupModal({
   const cardDigits = card.replace(/\D/g, '');
 
   const submit = async () => {
-    if (value === null || value < 100 || value > 500000) {
-      setError('Сумма пополнения: от 100 до 500 000 ₽');
+    if (value === null || value < (isOwner ? 1 : 100) || (!isOwner && value > 500000)) {
+      setError(
+        isOwner
+          ? 'Сумма пополнения: положительное целое число'
+          : 'Сумма пополнения: от 100 до 500 000 ₽',
+      );
       return;
     }
     if (cardDigits.length !== 16) {
       setError('Номер карты: 16 цифр');
       return;
     }
+    if (isOwner && pin.length !== 4) {
+      setError('Пароль карты: 4 цифры');
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
-      const res = await api.walletTopup(value, cardDigits);
+      const res = await api.walletTopup(value, cardDigits, isOwner ? pin : undefined);
       toast(`Операция выполнена: +${formatRub(value)}`, 'success');
       onDone(res.balance);
       onClose();
     } catch (e) {
+      // 400 «Неверный пароль карты» (SPEC v6 §32) показываем прямо в модалке
       setError(e instanceof Error ? e.message : 'Не удалось пополнить счёт');
     } finally {
       setBusy(false);
@@ -124,7 +136,9 @@ export function TopupModal({
           inputMode="numeric"
           value={amount}
           placeholder="1000"
-          onChange={(e) => setAmount(e.target.value.replace(/\D/g, '').slice(0, 6))}
+          onChange={(e) =>
+            setAmount(e.target.value.replace(/\D/g, '').slice(0, isOwner ? 12 : 6))
+          }
           autoFocus
         />
         <div className="chips">
@@ -138,6 +152,7 @@ export function TopupModal({
             </button>
           ))}
         </div>
+        {isOwner && <span className="hint">Верхний лимит суммы для владельца не действует</span>}
       </div>
 
       <div className="field">
@@ -152,6 +167,23 @@ export function TopupModal({
         />
         <span className="hint">Привяжите карту для быстрых пополнений счёта</span>
       </div>
+
+      {isOwner && (
+        <div className="field">
+          <label>Пароль карты</label>
+          <input
+            className="input card-input"
+            inputMode="numeric"
+            pattern="[0-9]*"
+            autoComplete="off"
+            value={pin}
+            placeholder="••••"
+            maxLength={4}
+            onChange={(e) => setPin(e.target.value.replace(/\D/g, '').slice(0, 4))}
+          />
+          <span className="hint">Пароль запрашивается при каждой операции с деньгами</span>
+        </div>
+      )}
     </Modal>
   );
 }
@@ -165,7 +197,7 @@ export function TransferModal({
   onDone,
 }: {
   onClose: () => void;
-  onDone: (balance: number | null) => void;
+  onDone: (balance: number) => void;
 }) {
   const { toast, user } = useApp();
   const [q, setQ] = useState('');
@@ -173,6 +205,7 @@ export function TransferModal({
   const [picked, setPicked] = useState<User | null>(null);
   const [amount, setAmount] = useState('');
   const [note, setNote] = useState('');
+  const [pin, setPin] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -194,31 +227,43 @@ export function TransferModal({
   }, [q, picked, user]);
 
   const value = toAmount(amount);
+  // SPEC v6 §32: владелец платит паролем карты; его исходящие операции
+  // баланс не уменьшают, а верхний лимит суммы снят
   const isOwner = user?.isOwner === true;
-  // SPEC v5 §29/§30: `balance === null` у карточки владельца → показываем «∞»
-  const rawBalance = user?.balance ?? null;
-  const balance = rawBalance ?? 0;
-  const unlimited = isOwner || rawBalance === null;
-  const rest = unlimited ? null : value !== null ? balance - value : balance;
+  const balance = user?.balance ?? 0;
+  const rest = isOwner ? balance : value !== null ? balance - value : balance;
 
   const submit = async () => {
     if (!picked) {
       setError('Выберите получателя');
       return;
     }
-    if (value === null || value < 1 || value > 500000) {
-      setError('Сумма перевода: от 1 до 500 000 ₽');
+    if (value === null || value < 1 || (!isOwner && value > 500000)) {
+      setError(
+        isOwner
+          ? 'Сумма перевода: положительное целое число'
+          : 'Сумма перевода: от 1 до 500 000 ₽',
+      );
+      return;
+    }
+    if (isOwner && pin.length !== 4) {
+      setError('Пароль карты: 4 цифры');
       return;
     }
     setBusy(true);
     setError(null);
     try {
-      const res = await api.walletTransfer(picked.id, value, note.trim() || undefined);
+      const res = await api.walletTransfer(
+        picked.id,
+        value,
+        note.trim() || undefined,
+        isOwner ? pin : undefined,
+      );
       toast(`Перевод: ${formatRub(value)} → ${picked.displayName}`, 'success');
       onDone(res.balance);
       onClose();
     } catch (e) {
-      // 409 → «Недостаточно средств» (SPEC v4 §24)
+      // 409 → «Недостаточно средств» (SPEC v4 §24); 400 → «Неверный пароль карты»
       if (e instanceof ApiError && e.status === 409) setError('Недостаточно средств');
       else setError(e instanceof Error ? e.message : 'Не удалось выполнить перевод');
     } finally {
@@ -303,9 +348,11 @@ export function TransferModal({
           inputMode="numeric"
           value={amount}
           placeholder="500"
-          onChange={(e) => setAmount(e.target.value.replace(/\D/g, '').slice(0, 6))}
+          onChange={(e) =>
+            setAmount(e.target.value.replace(/\D/g, '').slice(0, isOwner ? 12 : 6))
+          }
         />
-        <span className="hint">Доступно: {balanceText(rawBalance, isOwner)}</span>
+        <span className="hint">Доступно: {balanceText(user?.balance)}</span>
       </div>
 
       <div className="field">
@@ -318,6 +365,23 @@ export function TransferModal({
           onChange={(e) => setNote(e.target.value)}
         />
       </div>
+
+      {isOwner && (
+        <div className="field">
+          <label>Пароль карты</label>
+          <input
+            className="input card-input"
+            inputMode="numeric"
+            pattern="[0-9]*"
+            autoComplete="off"
+            value={pin}
+            placeholder="••••"
+            maxLength={4}
+            onChange={(e) => setPin(e.target.value.replace(/\D/g, '').slice(0, 4))}
+          />
+          <span className="hint">Пароль запрашивается при каждой операции с деньгами</span>
+        </div>
+      )}
 
       {picked && value !== null && value > 0 && (
         <div className="summary-box">
@@ -338,7 +402,7 @@ export function TransferModal({
           </div>
           <div className="info-kv">
             <span className="k">Баланс после перевода</span>
-            <span className="v">{rest === null ? '∞' : formatRub(Math.max(0, rest))}</span>
+            <span className="v">{formatRub(Math.max(0, rest))}</span>
           </div>
         </div>
       )}
@@ -409,12 +473,11 @@ export function WalletScreen({ onOpenNav }: ScreenProps) {
   const [showTopup, setShowTopup] = useState(false);
   const [showTransfer, setShowTransfer] = useState(false);
 
-  // SPEC v5 §29/§30: владелец (или balance === null после загрузки) → «∞»
-  const unlimited = user?.isOwner === true || (balance === null && payments !== null);
-  const balanceDisplay = unlimited ? '∞' : balance === null ? '…' : formatRub(balance);
+  // SPEC v6 §32: баланс — обычное число у всех, особой отметки для владельца нет
+  const balanceDisplay = balance === null ? '…' : formatRub(balance);
 
   const applyBalance = useCallback(
-    (next: number | null) => {
+    (next: number) => {
       setBalance(next);
       if (user) updateUser({ ...user, balance: next });
     },
@@ -466,9 +529,7 @@ export function WalletScreen({ onOpenNav }: ScreenProps) {
       <div className="list-column">
         <div className="wallet-card">
           <div className="wallet-label">Ваш баланс</div>
-          <div className={unlimited ? 'wallet-balance inf' : 'wallet-balance'}>
-            {balanceDisplay}
-          </div>
+          <div className="wallet-balance">{balanceDisplay}</div>
           <div className="wallet-actions">
             <button className="btn btn-primary" onClick={() => setShowTopup(true)}>
               <ArrowDownLeftIcon size={15} /> Пополнить

@@ -545,7 +545,7 @@ function UsersTab() {
                 {u.banned && <span className="status-badge rejected user-badge">Заблокирован</span>}
               </div>
               <div className="audit-meta">
-                {balanceText(u.balance, u.isOwner)} · {u.orgsCount}{' '}
+                {balanceText(u.balance)} · {u.orgsCount}{' '}
                 {u.orgsCount === 1 ? 'организация' : 'организаций'} · вход{' '}
                 {u.lastLoginAt ? dtFmt.format(u.lastLoginAt) : 'не было'}
               </div>

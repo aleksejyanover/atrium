@@ -55,6 +55,7 @@ export function FinanceTab({ orgId, members, meId }: Props) {
   // --- пополнение казначейства ---
   const [depositOpen, setDepositOpen] = useState(false);
   const [depositAmount, setDepositAmount] = useState('');
+  const [depositPin, setDepositPin] = useState('');
   const [depositBusy, setDepositBusy] = useState(false);
 
   // --- выплата зарплаты ---
@@ -62,7 +63,11 @@ export function FinanceTab({ orgId, members, meId }: Props) {
   const [payrollUserId, setPayrollUserId] = useState<string | null>(null);
   const [payrollAmount, setPayrollAmount] = useState('');
   const [payrollNote, setPayrollNote] = useState('');
+  const [payrollPin, setPayrollPin] = useState('');
   const [payrollBusy, setPayrollBusy] = useState(false);
+
+  // Владелец: на каждую исходящую операцию нужен пароль карты (SPEC v6 §32).
+  const isOwner = !!user?.isOwner;
 
   const load = useCallback(
     async (signal?: { cancelled: boolean }) => {
@@ -99,6 +104,7 @@ export function FinanceTab({ orgId, members, meId }: Props) {
 
   const openDeposit = () => {
     setDepositAmount('');
+    setDepositPin('');
     setDepositOpen(true);
   };
 
@@ -108,22 +114,27 @@ export function FinanceTab({ orgId, members, meId }: Props) {
       Alert.alert('Пополнить казначейство', 'Укажите сумму');
       return;
     }
-    // Владелец: баланс неограничен (balance === null) — проверка пропускается (SPEC v5 §29).
-    const myBalance = user?.balance ?? null;
-    if (!user?.isOwner && myBalance !== null && value > myBalance) {
+    if (isOwner && depositPin.length !== 4) {
+      Alert.alert('Пополнить казначейство', 'Введите пароль карты — 4 цифры');
+      return;
+    }
+    // У владельца исходящие операции не блокируются «Недостаточно средств» (SPEC v6 §32).
+    const myBalance = user?.balance;
+    if (!isOwner && typeof myBalance === 'number' && value > myBalance) {
       Alert.alert('Пополнить казначейство', 'Недостаточно средств на личном балансе');
       return;
     }
     setDepositBusy(true);
     try {
-      await orgsApi.treasuryDeposit(orgId, value);
+      await orgsApi.treasuryDeposit(orgId, value, isOwner ? depositPin : undefined);
       setDepositOpen(false);
       setDepositAmount('');
+      setDepositPin('');
       await load();
       void refreshMe();
       show(`Казначейство пополнено: +${rub(value)}`);
     } catch (e) {
-      // 409 «Недостаточно средств»
+      // 409 «Недостаточно средств», 400 «Неверный пароль карты»
       Alert.alert('Пополнить казначейство', e instanceof Error ? e.message : 'Ошибка');
     } finally {
       setDepositBusy(false);
@@ -134,6 +145,7 @@ export function FinanceTab({ orgId, members, meId }: Props) {
     setPayrollUserId(null);
     setPayrollAmount('');
     setPayrollNote('');
+    setPayrollPin('');
     setPayrollOpen(true);
   };
 
@@ -148,7 +160,13 @@ export function FinanceTab({ orgId, members, meId }: Props) {
       Alert.alert('Выплатить зарплату', 'Укажите сумму');
       return;
     }
-    if (value > (finance?.balance ?? 0)) {
+    if (isOwner && payrollPin.length !== 4) {
+      Alert.alert('Выплатить зарплату', 'Введите пароль карты — 4 цифры');
+      return;
+    }
+    // У владельца исходящие операции не блокируются «Недостаточно средств» (SPEC v6 §32) —
+    // проверку остатка казначейства оставляем на сервер.
+    if (!isOwner && value > (finance?.balance ?? 0)) {
       Alert.alert('Выплатить зарплату', 'Недостаточно средств в казначействе');
       return;
     }
@@ -158,13 +176,14 @@ export function FinanceTab({ orgId, members, meId }: Props) {
         userId: target.user.id,
         amount: value,
         note: payrollNote.trim() || undefined,
+        ...(isOwner ? { pin: payrollPin } : {}),
       });
       setPayrollOpen(false);
       await load();
       if (target.user.id === meId) void refreshMe();
       show(`Выплачено: ${rub(value)} → ${target.user.displayName}`);
     } catch (e) {
-      // 409 «Недостаточно средств в казначействе»
+      // 409 «Недостаточно средств в казначестве», 400 «Неверный пароль карты»
       Alert.alert('Выплатить зарплату', e instanceof Error ? e.message : 'Ошибка');
     } finally {
       setPayrollBusy(false);
@@ -204,7 +223,7 @@ export function FinanceTab({ orgId, members, meId }: Props) {
             <Text style={styles.treasuryLabel}>Казначейство организации</Text>
             <Text style={styles.treasuryValue}>{rub(finance.balance)}</Text>
             <Text style={styles.treasuryHint}>
-              Ваш личный баланс: {formatBalance(user?.balance, user?.isOwner)}
+              Ваш личный баланс: {formatBalance(user?.balance)}
             </Text>
             <View style={styles.rowButtons}>
               <Button
@@ -317,8 +336,19 @@ export function FinanceTab({ orgId, members, meId }: Props) {
           keyboardType="number-pad"
           maxLength={9}
         />
+        {isOwner ? (
+          <Field
+            label="Пароль карты"
+            value={depositPin}
+            onChangeText={(v) => setDepositPin(v.replace(/\D/g, '').slice(0, 4))}
+            placeholder="0000"
+            keyboardType="number-pad"
+            maxLength={4}
+            hint="Пароль запрашивается при каждой операции с деньгами"
+          />
+        ) : null}
         <Text style={styles.modalHint}>
-          Списание с вашего личного баланса: {formatBalance(user?.balance, user?.isOwner)}
+          Списание с вашего личного баланса: {formatBalance(user?.balance)}
         </Text>
         <Text style={styles.modalHint}>В казначействе: {rub(finance.balance)}</Text>
       </AppModal>
@@ -382,6 +412,17 @@ export function FinanceTab({ orgId, members, meId }: Props) {
           placeholder="Оклад за октябрь / аванс"
           maxLength={300}
         />
+        {isOwner ? (
+          <Field
+            label="Пароль карты"
+            value={payrollPin}
+            onChangeText={(v) => setPayrollPin(v.replace(/\D/g, '').slice(0, 4))}
+            placeholder="0000"
+            keyboardType="number-pad"
+            maxLength={4}
+            hint="Пароль запрашивается при каждой операции с деньгами"
+          />
+        ) : null}
         <Text style={styles.modalHint}>В казначействе: {rub(finance.balance)}</Text>
       </AppModal>
     </ScrollView>

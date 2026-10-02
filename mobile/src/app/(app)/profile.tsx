@@ -277,7 +277,7 @@ function ProfileScreen() {
             style={({ pressed }) => [styles.walletRow, pressed && { opacity: 0.8 }]}>
             <View style={{ flex: 1 }}>
               <Text style={[styles.walletBalance, user.isOwner && styles.walletBalanceOwner]}>
-                {formatBalance(user.balance, user.isOwner)}
+                {formatBalance(user.balance)}
               </Text>
               <Text style={styles.hint}>Пополнение счёта, переводы и история операций</Text>
             </View>
@@ -298,6 +298,8 @@ function ProfileScreen() {
                 displayName={user.displayName}
                 username={user.username}
                 userId={user.id}
+                balance={user.balance}
+                card={user.card}
               />
               <Text style={styles.hint}>
                 Вас всегда делают владельцем организации при вступлении

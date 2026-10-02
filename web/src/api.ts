@@ -190,20 +190,28 @@ function asArray(v: unknown): unknown[] {
 }
 
 /**
- * `balance` из ответов кошелька/профиля (SPEC v4 §24, v5 §29): у карточки
- * владельца сервер отдаёт `null` — «∞», поэтому `null` сохраняем как есть.
+ * `balance` из ответов кошелька/профиля (SPEC v6 §32): обычное число.
+ * `null`/кривые значения (устаревший кэш) → fallback.
  */
-function normalizeBalance(raw: unknown, fallback: number = 0): number | null {
-  if (typeof raw === 'number') return raw;
-  return raw === null ? null : fallback;
+function normalizeBalance(raw: unknown, fallback: number = 0): number {
+  return typeof raw === 'number' ? raw : fallback;
 }
 
-/** `GET /api/me` user (SPEC v5 §29): `isOwner` + `balance: null` для владельца. */
+/** `GET /api/me` user (SPEC v6 §32): `isOwner`, обычный `balance`, `card:{number,pin}` у владельца. */
 function normalizeSelfUser(raw: unknown): User {
   const user = unwrapUser(raw);
   if (!user) fail('Некорректный ответ сервера', 500);
-  if (!isRecord(raw) || raw.balance === undefined) return user;
-  return { ...user, balance: normalizeBalance(raw.balance) };
+  if (!isRecord(raw)) return user;
+  const next: User = { ...user };
+  if (raw.balance !== undefined) next.balance = normalizeBalance(raw.balance);
+  if (
+    isRecord(raw.card) &&
+    typeof raw.card.number === 'string' &&
+    typeof raw.card.pin === 'string'
+  ) {
+    next.card = { number: raw.card.number, pin: raw.card.pin };
+  }
+  return next;
 }
 
 /**
@@ -728,10 +736,10 @@ export const api = {
 
   /* ---------------- wallet (SPEC v4 §24) ---------------- */
 
-  async wallet(): Promise<{ balance: number | null; demo: boolean; payments: WalletPayment[] }> {
+  async wallet(): Promise<{ balance: number; demo: boolean; payments: WalletPayment[] }> {
     const res = await get<{ balance: unknown; demo?: unknown; payments: unknown }>('/api/wallet');
     return {
-      // SPEC v5 §29: у владельца `balance: null` → клиент рисует «∞»; `demo` никогда не показываем
+      // SPEC v6 §32: баланс — обычное число (и у владельца); `demo` никогда не показываем
       balance: normalizeBalance(res.balance),
       demo: res.demo !== false,
       payments: asArray(res.payments)
@@ -740,20 +748,29 @@ export const api = {
     };
   },
 
-  /** Зачисление на счёт (карта •••• 4242 → маска в истории операций). */
-  walletTopup(amount: number, cardNumber: string): Promise<{ balance: number | null }> {
-    return post<{ balance: number | null }>('/api/wallet/topup', { amount, cardNumber });
+  /**
+   * Зачисление на счёт (карта → маска в истории операций).
+   * `pin` обязателен для владельца (SPEC v6 §32), остальным не передаётся.
+   */
+  walletTopup(amount: number, cardNumber: string, pin?: string): Promise<{ balance: number }> {
+    return post<{ balance: number }>('/api/wallet/topup', {
+      amount,
+      cardNumber,
+      ...(pin ? { pin } : {}),
+    });
   },
 
   walletTransfer(
     toUserId: string,
     amount: number,
     note?: string,
-  ): Promise<{ balance: number | null }> {
-    return post<{ balance: number | null }>('/api/wallet/transfer', {
+    pin?: string,
+  ): Promise<{ balance: number }> {
+    return post<{ balance: number }>('/api/wallet/transfer', {
       toUserId,
       amount,
       ...(note ? { note } : {}),
+      ...(pin ? { pin } : {}),
     });
   },
 
@@ -783,21 +800,25 @@ export const api = {
     };
   },
 
-  /** Move funds from my personal balance into the org treasury (rank ≥ 60). */
+  /**
+   * Move funds from my personal balance into the org treasury (rank ≥ 60).
+   * `pin` обязателен для владельца (SPEC v6 §32).
+   */
   treasuryDeposit(
     orgId: string,
     amount: number,
-  ): Promise<{ balance: number; userBalance: number | null }> {
-    return post<{ balance: number; userBalance: number | null }>(
+    pin?: string,
+  ): Promise<{ balance: number; userBalance: number }> {
+    return post<{ balance: number; userBalance: number }>(
       `/api/orgs/${orgId}/treasury/deposit`,
-      { amount },
+      { amount, ...(pin ? { pin } : {}) },
     );
   },
 
-  /** Pay a salary from the treasury (rank ≥ 60). */
+  /** Pay a salary from the treasury (rank ≥ 60); `pin` обязателен для владельца. */
   payroll(
     orgId: string,
-    body: { userId: string; amount: number; note?: string },
+    body: { userId: string; amount: number; note?: string; pin?: string },
   ): Promise<{ orgBalance: number }> {
     return post<{ orgBalance: number }>(`/api/orgs/${orgId}/payroll`, body);
   },

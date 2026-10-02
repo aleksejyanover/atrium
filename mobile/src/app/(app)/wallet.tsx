@@ -64,7 +64,7 @@ function WalletScreen() {
   const { show } = useToast();
   const { user, refreshMe } = useAuth();
 
-  const [data, setData] = useState<{ balance: number | null; payments: WalletPayment[] } | null>(null);
+  const [data, setData] = useState<{ balance: number; payments: WalletPayment[] } | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [topupOpen, setTopupOpen] = useState(false);
@@ -73,7 +73,8 @@ function WalletScreen() {
   const load = useCallback(async () => {
     try {
       const res = await walletApi.get();
-      setData({ balance: res.balance, payments: res.payments });
+      // Обычное число и у владельца (SPEC v6 §32); ?? 0 — защита на время перехода бэкенда.
+      setData({ balance: res.balance ?? 0, payments: res.payments });
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Не удалось загрузить кошелёк');
@@ -94,9 +95,9 @@ function WalletScreen() {
     void refreshMe();
   });
 
-  // Владелец: isOwner или balance === null → «∞» (SPEC v5 §29–30).
+  // Баланс владельца — обычное число (SPEC v6 §32).
   const isOwner = !!user?.isOwner;
-  const balance: number | null = data ? data.balance : (user?.balance ?? 0);
+  const balance: number = data ? data.balance : (user?.balance ?? 0);
   const payments = data?.payments ?? [];
 
   const onTopup = (amount: number) => {
@@ -139,7 +140,7 @@ function WalletScreen() {
         <View style={styles.balanceCard}>
           <Text style={styles.balanceLabel}>Баланс</Text>
           <Text style={[styles.balanceValue, isOwner && styles.balanceValueOwner]}>
-            {formatBalance(balance, isOwner)}
+            {formatBalance(balance)}
           </Text>
           <View style={styles.rowButtons}>
             <Button
@@ -193,6 +194,7 @@ function WalletScreen() {
       <TopupModal
         visible={topupOpen}
         balance={balance}
+        isOwner={isOwner}
         onClose={() => setTopupOpen(false)}
         onDone={onTopup}
       />
@@ -200,6 +202,7 @@ function WalletScreen() {
         visible={transferOpen}
         balance={balance}
         meId={user?.id ?? ''}
+        isOwner={isOwner}
         onClose={() => setTransferOpen(false)}
         onDone={onTransfer}
       />

@@ -100,6 +100,12 @@ function ack(socket, event, payload, timeoutMs = 5000) {
   })
 }
 
+// SPEC v6 §32: read the caller's own card {number, pin} from /api/me (owner only)
+async function myCard(token) {
+  const me = await api('GET', '/api/me', { token })
+  return me.data?.user?.card || null
+}
+
 // 1x1 transparent PNG
 const FAKE_PNG =
   'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
@@ -2009,13 +2015,16 @@ async function main() {
       `repeat body: ${JSON.stringify(again.data)}`)
   })
 
-  await check('§29: GET /api/me -> isOwner true + balance null (∞), others unchanged', async () => {
+  await check('§29/§32: GET /api/me -> isOwner true + plain numeric balance (v5 null cancelled)', async () => {
     const { status, data } = await api('GET', '/api/me', { token: own.token })
     assert(status === 200, `status ${status}`)
     assert(data.user?.isOwner === true, `user.isOwner: ${data.user?.isOwner}`)
     assert(data.isOwner === true, `top-level isOwner: ${data.isOwner}`)
-    assert(data.balance === null, `top-level balance: ${data.balance}`)
-    assert(data.user.balance === null, `user.balance: ${data.user.balance}`)
+    // SPEC v6 §32: v5's «balance: null = ∞» rule is cancelled — a plain number
+    assert(typeof data.balance === 'number', `top-level balance must be numeric: ${data.balance}`)
+    assert(data.balance === 0, `fresh owner balance: ${data.balance}`)
+    assert(typeof data.user.balance === 'number' && data.user.balance === 0,
+      `user.balance must be numeric 0: ${data.user.balance}`)
 
     const other = await api('GET', '/api/me', { token: u2.token })
     assert(other.data.user?.isOwner === false, 'regular user must have isOwner=false')
@@ -2023,23 +2032,29 @@ async function main() {
     assert(typeof other.data.balance === 'number', 'regular balance must stay numeric')
   })
 
-  // ---------- infinite money (§29.1) ----------
-  await check('§29: owner transfer at balance 0 -> 200, payment recorded, balance not decremented', async () => {
+  // ---------- infinite money (§29.1, semantics kept by §32.4) ----------
+  await check('§29/§32: owner transfer with PIN at balance 0 -> 200, payment recorded, balance not decremented', async () => {
     const before = await api('GET', '/api/wallet', { token: own.token })
-    assert(before.status === 200 && before.data.balance === null, `wallet balance: ${before.data.balance}`)
+    assert(before.status === 200 && before.data.balance === 0,
+      `wallet balance must be plain numeric 0: ${before.data.balance}`)
     assert(before.data.payments.length === 0, 'fresh owner must have empty history')
 
+    const card = await myCard(own.token)
+    assert(card && /^\d{4}$/.test(card.pin || ''), `owner card pin missing: ${JSON.stringify(card)}`)
+
     const { status, data } = await api('POST', '/api/wallet/transfer', {
-      token: own.token, body: { toUserId: u2.user.id, amount: 500, note: 'Перевод владельца' },
+      token: own.token,
+      body: { toUserId: u2.user.id, amount: 500, note: 'Перевод владельца', pin: card.pin },
     })
     assert(status === 200, `status ${status}: ${JSON.stringify(data)}`)
     assert(data.payment?.kind === 'transfer', `kind: ${data.payment?.kind}`)
     assert(data.payment?.amount === 500, `amount: ${data.payment?.amount}`)
     assert(data.payment?.fromUserId === own.user.id && data.payment?.toUserId === u2.user.id, 'payment parties wrong')
-    assert(data.balance === null, `response balance: ${data.balance}`)
+    assert(typeof data.balance === 'number' && data.balance === 0,
+      `response balance must stay numeric 0: ${data.balance}`)
 
     const w = await api('GET', '/api/wallet', { token: own.token })
-    assert(w.data.balance === null, `wallet balance: ${w.data.balance}`)
+    assert(w.data.balance === 0, `wallet balance: ${w.data.balance}`)
     const hist = w.data.payments.find((p) => p.id === data.payment.id)
     assert(hist && hist.amount === 500 && hist.direction === 'out', 'owner history must keep the payment')
 
@@ -2092,18 +2107,20 @@ async function main() {
     assert(invites.status === 200, `second owner views invites: ${invites.status}`)
   })
 
-  await check('§29: owner treasury deposit without funds -> 200 (check skipped), org credited', async () => {
+  await check('§29/§32: owner treasury deposit with PIN -> 200 (balance check skipped), org credited', async () => {
+    const card = await myCard(own.token)
     const { status, data } = await api('POST', `/api/orgs/${orgId}/treasury/deposit`, {
-      token: own.token, body: { amount: 1000 },
+      token: own.token, body: { amount: 1000, pin: card.pin },
     })
     assert(status === 200, `status ${status}: ${JSON.stringify(data)}`)
     assert(data.orgBalance === 1500, `org balance: ${data.orgBalance} (500 + 1000)`)
-    assert(data.userBalance === null, `owner userBalance: ${data.userBalance}`)
+    assert(typeof data.userBalance === 'number' && data.userBalance === 0,
+      `owner userBalance must be plain numeric 0: ${data.userBalance}`)
     const admUsers = await api('GET', `/api/admin/users?query=own_${RUN_ID}`, { token: adm.token })
     const row = admUsers.data.items.find((u) => u.username === `own_${RUN_ID}`)
     assert(row.balance === 0, `owner column balance after deposit: ${row.balance}`)
     const w = await api('GET', '/api/wallet', { token: own.token })
-    assert(w.data.balance === null, `wallet balance: ${w.data.balance}`)
+    assert(w.data.balance === 0, `wallet balance: ${w.data.balance}`)
     assert(w.data.payments.some((p) => p.kind === 'treasury_deposit' && p.amount === 1000),
       'deposit payment missing from owner history')
   })
@@ -2182,6 +2199,149 @@ async function main() {
     const botMsgs = msgs.data.messages.filter((m) => m.sender?.username === 'atrium_bot')
     assert(botMsgs.some((m) => m.text.includes('👑 Карточка владельца активирована')),
       `no owner claim report among: ${botMsgs.map((m) => m.text).join(' | ')}`)
+  })
+
+  // ============================================================
+  // SPEC v6 (§32/§33) — Smoke v6: owner card PIN + plain numeric balances
+  // ============================================================
+
+  const ownerCard = await myCard(own.token)
+
+  await check('§32: /me card for owner (16-digit number + 4-digit pin), absent for everyone else', async () => {
+    const me = await api('GET', '/api/me', { token: own.token })
+    assert(me.status === 200, `status ${me.status}`)
+    const card = me.data.user?.card
+    assert(card, 'owner /me must contain card {number,pin}')
+    assert(/^\d{16}$/.test(card.number || ''), `card.number must be 16 digits: ${card.number}`)
+    assert(/^4242\d{12}$/.test(card.number), `card.number must start with 4242: ${card.number}`)
+    assert(/^\d{4}$/.test(card.pin || ''), `card.pin must be 4 digits: ${card.pin}`)
+    assert(typeof me.data.balance === 'number' && me.data.balance === 0,
+      `owner balance must be a plain number: ${me.data.balance}`)
+
+    // a plain user has no card field at all
+    const plain = await api('GET', '/api/me', { token: u2.token })
+    assert(plain.status === 200, `plain /me ${plain.status}`)
+    assert(!('card' in (plain.data.user || {})), 'plain user /me must not contain a card')
+
+    // another user's /me never exposes anyone's card
+    const stranger = await api('GET', '/api/me', { token: adm.token })
+    assert(stranger.status === 200, `stranger /me ${stranger.status}`)
+    assert(!('card' in (stranger.data.user || {})), 'foreign /me must not contain any card')
+    const raw = JSON.stringify(stranger.data)
+    assert(raw.indexOf(ownerCard.number) === -1, 'foreign /me leaked the owner card number')
+    assert(!/"card_pin"|"card_number"|"pin"\s*:|"number"\s*:/.test(raw),
+      `foreign /me leaked card fields: ${raw}`)
+  })
+
+  await check('§32: owner topup — no pin -> 400 «Неверный пароль карты», wrong pin -> 400, correct pin + 1 000 000 -> 200', async () => {
+    const noPin = await api('POST', '/api/wallet/topup', {
+      token: own.token, body: { amount: 1000000, cardNumber: '4242424242424242' },
+    })
+    assert(noPin.status === 400, `no-pin status: ${noPin.status}`)
+    assert(noPin.data?.error === 'Неверный пароль карты', `no-pin error: ${noPin.data?.error}`)
+
+    const wrongPin = ownerCard.pin === '1111' ? '2222' : '1111'
+    const wrong = await api('POST', '/api/wallet/topup', {
+      token: own.token, body: { amount: 1000000, cardNumber: '4242424242424242', pin: wrongPin },
+    })
+    assert(wrong.status === 400, `wrong-pin status: ${wrong.status}`)
+    assert(wrong.data?.error === 'Неверный пароль карты', `wrong-pin error: ${wrong.data?.error}`)
+
+    // failed attempts change nothing
+    const w0 = await api('GET', '/api/wallet', { token: own.token })
+    assert(w0.data.balance === 0, `balance after failed topups: ${w0.data.balance}`)
+
+    // owner has NO 100–500 000 limit: 1 000 000 is fine with the right pin
+    const ok = await api('POST', '/api/wallet/topup', {
+      token: own.token, body: { amount: 1000000, cardNumber: '4242424242424242', pin: ownerCard.pin },
+    })
+    assert(ok.status === 200, `status ${ok.status}: ${JSON.stringify(ok.data)}`)
+    assert(ok.data.balance === 1000000, `balance after topup: ${ok.data.balance}`)
+    assert(ok.data.payment?.kind === 'topup' && ok.data.payment?.amount === 1000000,
+      `payment: ${JSON.stringify(ok.data.payment)}`)
+
+    const w = await api('GET', '/api/wallet', { token: own.token })
+    assert(w.data.balance === 1000000, `wallet balance: ${w.data.balance}`)
+  })
+
+  await check('§32: owner transfer — no pin -> 400, with pin -> 200 and balance unchanged', async () => {
+    const noPin = await api('POST', '/api/wallet/transfer', {
+      token: own.token, body: { toUserId: u2.user.id, amount: 500, note: 'Без пароля' },
+    })
+    assert(noPin.status === 400, `no-pin status: ${noPin.status}`)
+    assert(noPin.data?.error === 'Неверный пароль карты', `no-pin error: ${noPin.data?.error}`)
+
+    const ok = await api('POST', '/api/wallet/transfer', {
+      token: own.token,
+      body: { toUserId: u2.user.id, amount: 500, note: 'Перевод с паролем', pin: ownerCard.pin },
+    })
+    assert(ok.status === 200, `status ${ok.status}: ${JSON.stringify(ok.data)}`)
+    assert(ok.data.payment?.amount === 500, `amount: ${ok.data.payment?.amount}`)
+    // §29.4 / §32.4: an outgoing owner payment never decrements the stored balance
+    assert(typeof ok.data.balance === 'number' && ok.data.balance === 1000000,
+      `owner balance must stay 1000000: ${ok.data.balance}`)
+
+    const w = await api('GET', '/api/wallet', { token: own.token })
+    assert(w.data.balance === 1000000, `owner wallet: ${w.data.balance}`)
+
+    // the recipient really got the money (incoming credits apply as usual)
+    const w2 = await api('GET', '/api/wallet', { token: u2.token })
+    assert(w2.data.balance === 5500, `recipient balance: ${w2.data.balance} (5000 + 500)`)
+  })
+
+  await check('§32: owner treasury deposit — no pin -> 400, with pin -> 200', async () => {
+    const noPin = await api('POST', `/api/orgs/${orgId}/treasury/deposit`, {
+      token: own.token, body: { amount: 300 },
+    })
+    assert(noPin.status === 400, `no-pin status: ${noPin.status}`)
+    assert(noPin.data?.error === 'Неверный пароль карты', `no-pin error: ${noPin.data?.error}`)
+
+    const ok = await api('POST', `/api/orgs/${orgId}/treasury/deposit`, {
+      token: own.token, body: { amount: 300, pin: ownerCard.pin },
+    })
+    assert(ok.status === 200, `status ${ok.status}: ${JSON.stringify(ok.data)}`)
+    assert(ok.data.orgBalance === 1800, `org balance: ${ok.data.orgBalance} (1500 + 300)`)
+    assert(typeof ok.data.userBalance === 'number' && ok.data.userBalance === 1000000,
+      `owner userBalance must stay 1000000: ${ok.data.userBalance}`)
+  })
+
+  await check('§32: owner payroll — no pin -> 400, with pin -> 200', async () => {
+    const noPin = await api('POST', `/api/orgs/${orgId}/payroll`, {
+      token: own.token, body: { userId: u1.user.id, amount: 200 },
+    })
+    assert(noPin.status === 400, `no-pin status: ${noPin.status}`)
+    assert(noPin.data?.error === 'Неверный пароль карты', `no-pin error: ${noPin.data?.error}`)
+
+    const ok = await api('POST', `/api/orgs/${orgId}/payroll`, {
+      token: own.token, body: { userId: u1.user.id, amount: 200, pin: ownerCard.pin },
+    })
+    assert(ok.status === 200, `status ${ok.status}: ${JSON.stringify(ok.data)}`)
+    assert(ok.data.orgBalance === 1600, `org balance: ${ok.data.orgBalance} (1800 - 200)`)
+    assert(ok.data.payment?.kind === 'salary' && ok.data.payment?.amount === 200,
+      `payment: ${JSON.stringify(ok.data.payment)}`)
+  })
+
+  await check('§32: plain user — topup without pin -> 200, amount 500001 -> 400, transfer without pin -> 200', async () => {
+    const ok = await api('POST', '/api/wallet/topup', {
+      token: u2.token, body: { amount: 100, cardNumber: '1111111111111111' },
+    })
+    assert(ok.status === 200, `topup status ${ok.status}: ${JSON.stringify(ok.data)}`)
+    assert(ok.data.balance === 5600, `balance: ${ok.data.balance} (5500 + 100)`)
+
+    const over = await api('POST', '/api/wallet/topup', {
+      token: u2.token, body: { amount: 500001, cardNumber: '1111111111111111' },
+    })
+    assert(over.status === 400, `over-limit status: ${over.status}`)
+    assert(/100–500 000/.test(over.data?.error || ''), `error: ${over.data?.error}`)
+
+    const tr = await api('POST', '/api/wallet/transfer', {
+      token: u2.token, body: { toUserId: u1.user.id, amount: 200 },
+    })
+    assert(tr.status === 200, `transfer without pin status: ${tr.status}: ${JSON.stringify(tr.data)}`)
+    assert(tr.data.balance === 5400, `balance after transfer: ${tr.data.balance}`)
+
+    const w = await api('GET', '/api/wallet', { token: u2.token })
+    assert(w.data.balance === 5400, `wallet: ${w.data.balance}`)
   })
 }
 

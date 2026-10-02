@@ -59,14 +59,9 @@ export function Sidebar({ open, onNavigate }: SidebarProps) {
   const appsBadge = pendingIncoming + pendingMine;
   const docsBadge = myDocuments.filter((d) => d.document.status === 'pending').length;
 
-  // SPEC v5 §29/§30: у карточки владельца баланс «∞» (isOwner / balance === null)
-  const balanceBadge = user
-    ? user.isOwner === true || user.balance === null
-      ? '∞'
-      : typeof user.balance === 'number'
-        ? formatRub(user.balance)
-        : null
-    : null;
+  // SPEC v6 §32: баланс — обычное число у всех (и у владельца)
+  const balanceBadge =
+    user && typeof user.balance === 'number' ? formatRub(user.balance) : null;
 
   useEffect(() => {
     if (!orgMenu) return;
@@ -156,13 +151,7 @@ export function Sidebar({ open, onNavigate }: SidebarProps) {
             <WalletIcon size={15} />
             <span className="grow">Кошелёк</span>
             {balanceBadge !== null && (
-              <span
-                className={
-                  balanceBadge === '∞' ? 'badge balance-badge inf' : 'badge balance-badge'
-                }
-              >
-                {balanceBadge}
-              </span>
+              <span className="badge balance-badge">{balanceBadge}</span>
             )}
           </button>
         </div>

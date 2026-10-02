@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import Database from 'better-sqlite3'
-import { rankOf, ADMIN_USERNAMES } from './util.js'
+import { rankOf, ADMIN_USERNAMES, generateCardNumber, generateCardPin } from './util.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const DATA_DIR = path.join(__dirname, '..', 'data')
@@ -183,6 +183,10 @@ ensureColumn('orgs', 'balance', 'INTEGER DEFAULT 0') // org treasury, integer ru
 // ---- SPEC v5 §29: owner card ----
 ensureColumn('users', 'is_owner', 'INTEGER DEFAULT 0') // card owner: infinite money, forced owner role
 
+// ---- SPEC v6 §32: owner card credentials (16-digit number, 4-digit PIN) ----
+ensureColumn('users', 'card_number', 'TEXT') // '4242' + 12 digits, only for is_owner
+ensureColumn('users', 'card_pin', 'TEXT') // 4 digits, only for is_owner
+
 /** Run fn inside a single SQLite transaction (all balance mutations, SPEC v4 §24). */
 export function transaction(fn) {
   return db.transaction(fn)()
@@ -213,6 +217,22 @@ export function run(sql, ...params) {
 export const findUserById = (id) => get('SELECT * FROM users WHERE id = ?', id)
 export const findUserByUsername = (username) => get('SELECT * FROM users WHERE username = ?', username)
 export const findUserByEmail = (email) => get('SELECT * FROM users WHERE email = ?', email)
+
+/**
+ * SPEC v6 §32: make sure an owner row has card credentials, generating them
+ * when missing (used by POST /api/owner/claim and the start-up backfill below).
+ * Returns the row with card_number/card_pin filled in.
+ */
+export function ensureOwnerCard(row) {
+  if (!row || !row.is_owner) return row
+  const cardNumber = row.card_number || generateCardNumber()
+  const cardPin = row.card_pin || generateCardPin()
+  if (cardNumber !== row.card_number || cardPin !== row.card_pin) {
+    run('UPDATE users SET card_number = ?, card_pin = ? WHERE id = ?', cardNumber, cardPin, row.id)
+    return { ...row, card_number: cardNumber, card_pin: cardPin }
+  }
+  return row
+}
 
 export const findOrg = (id) => get('SELECT * FROM orgs WHERE id = ?', id)
 export const findMember = (orgId, userId) =>
@@ -344,3 +364,14 @@ export const superadminIds = () => {
 
 /** System bot user id (SPEC v4 §23), exists only once created lazily. */
 export const BOT_ID = 'u_bot'
+
+// ---- SPEC v6 §32: lazy start-up backfill ----
+// Owners activated before v6 (is_owner = 1, card_number IS NULL) get their
+// card number + PIN generated once, at server start. Idempotent.
+{
+  const pending = all(
+    "SELECT * FROM users WHERE is_owner = 1 AND (card_number IS NULL OR card_pin IS NULL)"
+  )
+  for (const row of pending) ensureOwnerCard(row)
+  if (pending.length) console.log(`[atrium] owner cards generated: ${pending.length}`)
+}

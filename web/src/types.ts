@@ -19,10 +19,20 @@ export interface User {
   signatureText?: string | null;
   /** Superadmin-флаг, вычисляется сервером (SPEC v4 §23/§25). */
   isAdmin?: boolean;
-  /** Личный баланс кошелька, целые рубли; у карточки владельца — `null` («∞», SPEC v5 §29). */
+  /** Личный баланс кошелька, целые рубли (SPEC v6 §32: и у владельца обычное число). */
   balance?: number | null;
-  /** Карточка владельца: бесконечные деньги, принудительный owner при вступлении (SPEC v5 §29). */
+  /** Карточка владельца: принудительный owner при вступлении (SPEC v5 §29). */
   isOwner?: boolean;
+  /** Номер и пароль карты — только у владельца, только в `GET /api/me` (SPEC v6 §32). */
+  card?: OwnerCard | null;
+}
+
+/** Карта владельца: видит только сам владелец (`GET /api/me` → `user.card`, SPEC v6 §32). */
+export interface OwnerCard {
+  /** 16 цифр. */
+  number: string;
+  /** 4 цифры — пароль карты, нужен при каждой операции с деньгами. */
+  pin: string;
 }
 
 export type Role = 'owner' | 'assistant_owner' | 'admin' | 'assistant_admin' | 'member';
@@ -421,11 +431,10 @@ export function formatRub(n: number): string {
 }
 
 /**
- * Текст баланса для UI (SPEC v5 §29/§30): карточка владельца или `balance === null`
- * → «∞», иначе сумма в рублях.
+ * Текст баланса для UI (SPEC v6 §32): сумма в рублях; особой отметки для
+ * владельца больше нет, `null`/`undefined` трактуем как 0.
  */
-export function balanceText(balance: number | null | undefined, isOwner?: boolean): string {
-  if (isOwner === true || balance === null) return '∞';
+export function balanceText(balance: number | null | undefined): string {
   return formatRub(balance ?? 0);
 }
 

@@ -1,22 +1,28 @@
 import { useState } from 'react';
-import { StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 import Svg, { Defs, LinearGradient, Rect, Stop } from 'react-native-svg';
 
-import { ownerSerial } from '@/lib/format';
+import { formatBalance, formatCardNumber, maskCardNumber, ownerSerial } from '@/lib/format';
 import { colors, radius } from '@/lib/theme';
 
 interface Props {
   displayName: string;
   username: string;
   userId: string;
+  /** Баланс владельца — обычное число (SPEC v6 §32). */
+  balance?: number | null;
+  /** Номер и пароль карты из GET /api/me — только у is_owner (SPEC v6 §32). */
+  card?: { number: string; pin: string } | null;
 }
 
 /**
- * Стилизованная карточка владельца (SPEC v5 §30): градиент #2A2140 → #17171C,
- * рамка #F5BE41, надпись «ВЛАДЕЛЕЦ», имя, «Баланс: ∞», серийный OWNER-XXXX.
+ * Стилизованная карточка владельца (SPEC v5 §30, v6 §32): градиент #2A2140 → #17171C,
+ * рамка #F5BE41, надпись «ВЛАДЕЛЕЦ», имя, номер карты (маска + «Показать номер»),
+ * пароль карты, баланс обычным числом, серийный OWNER-XXXX.
  */
-export function OwnerCard({ displayName, username, userId }: Props) {
+export function OwnerCard({ displayName, username, userId, balance, card }: Props) {
   const [size, setSize] = useState({ w: 0, h: 0 });
+  const [showNumber, setShowNumber] = useState(false);
 
   return (
     <View
@@ -47,10 +53,31 @@ export function OwnerCard({ displayName, username, userId }: Props) {
         <Text style={styles.username} numberOfLines={1}>
           @{username}
         </Text>
+
+        {card ? (
+          <View style={styles.numberRow}>
+            <Text style={styles.number} numberOfLines={1}>
+              {showNumber ? formatCardNumber(card.number) : maskCardNumber(card.number)}
+            </Text>
+            <Pressable onPress={() => setShowNumber((v) => !v)} hitSlop={8}>
+              <Text style={styles.toggle}>{showNumber ? 'Скрыть номер' : 'Показать номер'}</Text>
+            </Pressable>
+          </View>
+        ) : null}
+
         <View style={styles.bottomRow}>
-          <Text style={styles.balance}>Баланс: ∞</Text>
+          <Text style={styles.balance}>Баланс: {formatBalance(balance)}</Text>
           <Text style={styles.serial}>{ownerSerial(userId)}</Text>
         </View>
+
+        {card ? (
+          <>
+            <Text style={styles.pin}>Пароль карты: {card.pin}</Text>
+            <Text style={styles.pinCaption}>
+              Пароль запрашивается при каждой операции с деньгами
+            </Text>
+          </>
+        ) : null}
       </View>
     </View>
   );
@@ -92,10 +119,29 @@ const styles = StyleSheet.create({
     color: 'rgba(236,236,239,0.65)',
     fontSize: 13,
   },
+  numberRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+    marginTop: 12,
+  },
+  number: {
+    color: 'rgba(236,236,239,0.9)',
+    fontSize: 15,
+    letterSpacing: 1.5,
+    flexShrink: 1,
+  },
+  toggle: {
+    color: colors.gold,
+    fontSize: 12,
+    fontWeight: '700',
+  },
   bottomRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+    gap: 10,
     marginTop: 14,
   },
   balance: {
@@ -107,5 +153,17 @@ const styles = StyleSheet.create({
     color: 'rgba(236,236,239,0.55)',
     fontSize: 12,
     letterSpacing: 1.5,
+  },
+  pin: {
+    color: colors.gold,
+    fontSize: 14,
+    fontWeight: '700',
+    marginTop: 10,
+  },
+  pinCaption: {
+    color: 'rgba(236,236,239,0.55)',
+    fontSize: 11,
+    lineHeight: 15,
+    marginTop: 2,
   },
 });

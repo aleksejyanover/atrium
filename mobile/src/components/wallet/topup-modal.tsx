@@ -11,27 +11,35 @@ const QUICK_AMOUNTS = [500, 1000, 5000];
 
 interface Props {
   visible: boolean;
-  /** Текущий баланс — подсказка под суммой (null — баланс не ограничен, SPEC v5 §29). */
+  /** Текущий баланс — подсказка под суммой (обычное число, SPEC v6 §32). */
   balance: number | null;
+  /** Владелец: требуется пароль карты, лимит суммы снят (SPEC v6 §32). */
+  isOwner: boolean;
   onClose(): void;
   /** Успешное пополнение: родитель перечитывает кошелёк и показывает тост. */
   onDone(amount: number): void;
 }
 
 /** Модалка пополнения счёта картой (SPEC v5 §30 — нейтральные банковские тексты). */
-export function TopupModal({ visible, balance, onClose, onDone }: Props) {
+export function TopupModal({ visible, balance, isOwner, onClose, onDone }: Props) {
   const [amount, setAmount] = useState('');
   const [card, setCard] = useState('');
+  const [pin, setPin] = useState('');
   const [busy, setBusy] = useState(false);
 
   const amountValue = parseInt(amount.replace(/\D/g, ''), 10) || 0;
   const cardDigits = card.replace(/\D/g, '');
-  const valid = amountValue >= 100 && amountValue <= 500000 && cardDigits.length === 16;
+  // Владелец: сумма от 1 ₽ без верхней границы, обязателен пароль карты (SPEC v6 §32).
+  const valid = isOwner
+    ? amountValue >= 1 && cardDigits.length === 16 && pin.length === 4
+    : amountValue >= 100 && amountValue <= 500000 && cardDigits.length === 16;
+  const amountLimit = isOwner ? 9 : 6;
 
   // Сброс полей при закрытии: состояние живёт, только пока модалка открыта.
   const reset = () => {
     setAmount('');
     setCard('');
+    setPin('');
   };
   const close = () => {
     reset();
@@ -42,16 +50,23 @@ export function TopupModal({ visible, balance, onClose, onDone }: Props) {
     if (!valid) {
       Alert.alert(
         'Пополнение',
-        'Укажите сумму (100–500 000 ₽) и номер карты — 16 цифр',
+        isOwner
+          ? 'Укажите сумму (от 1 ₽), номер карты — 16 цифр и пароль карты — 4 цифры'
+          : 'Укажите сумму (100–500 000 ₽) и номер карты — 16 цифр',
       );
       return;
     }
     setBusy(true);
     try {
-      await walletApi.topup({ amount: amountValue, cardNumber: cardDigits });
+      await walletApi.topup({
+        amount: amountValue,
+        cardNumber: cardDigits,
+        ...(isOwner ? { pin } : {}),
+      });
       reset();
       onDone(amountValue);
     } catch (e) {
+      // 400 «Неверный пароль карты» — серверное сообщение в алерте.
       Alert.alert('Пополнение', e instanceof Error ? e.message : 'Ошибка');
     } finally {
       setBusy(false);
@@ -73,10 +88,10 @@ export function TopupModal({ visible, balance, onClose, onDone }: Props) {
       <Field
         label="Сумма пополнения, ₽"
         value={amount}
-        onChangeText={(v) => setAmount(v.replace(/\D/g, '').slice(0, 6))}
-        placeholder="100 – 500 000"
+        onChangeText={(v) => setAmount(v.replace(/\D/g, '').slice(0, amountLimit))}
+        placeholder={isOwner ? 'Любая сумма от 1 ₽' : '100 – 500 000'}
         keyboardType="number-pad"
-        maxLength={6}
+        maxLength={amountLimit}
       />
 
       <View style={styles.chips}>
@@ -105,6 +120,18 @@ export function TopupModal({ visible, balance, onClose, onDone }: Props) {
         maxLength={19}
         hint="16 цифр с лицевой стороны карты"
       />
+
+      {isOwner ? (
+        <Field
+          label="Пароль карты"
+          value={pin}
+          onChangeText={(v) => setPin(v.replace(/\D/g, '').slice(0, 4))}
+          placeholder="0000"
+          keyboardType="number-pad"
+          maxLength={4}
+          hint="Пароль запрашивается при каждой операции с деньгами"
+        />
+      ) : null}
 
       <Text style={styles.balanceHint}>Текущий баланс: {formatBalance(balance)}</Text>
     </AppModal>

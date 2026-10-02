@@ -72,10 +72,43 @@ export function meUser(row) {
     signatureText: row.signature_text ?? null,
     // SPEC v4 §23/§25: computed on the server, never accepted from the client
     isAdmin: isAdminUsername(row.username),
-    // SPEC v5 §29: owner balance is unlimited → null (client renders «∞»)
-    balance: owner ? null : (row.balance ?? 0),
+    // SPEC v6 §32: plain numeric balance for everyone (v5's «null = ∞» is cancelled)
+    balance: row.balance ?? 0,
     isOwner: owner,
+    // SPEC v6 §32: card number + PIN are visible ONLY to the owner themselves,
+    // and only on their own /api/me — never for anyone else (publicUser has no card)
+    ...(owner ? { card: { number: row.card_number ?? null, pin: row.card_pin ?? null } } : {}),
   }
+}
+
+// ---- SPEC v6 §32: owner card credentials (card_number / card_pin) ----
+
+/** 16-digit card number: '4242' + 12 random digits. */
+export function generateCardNumber() {
+  let s = '4242'
+  for (let i = 0; i < 12; i++) s += String(crypto.randomInt(0, 10))
+  return s
+}
+
+/** 4 random digits. */
+export function generateCardPin() {
+  let s = ''
+  for (let i = 0; i < 4; i++) s += String(crypto.randomInt(0, 10))
+  return s
+}
+
+/**
+ * SPEC v6 §32: every outgoing money operation of a card owner (topup, transfer,
+ * treasury deposit, payroll) requires the `pin` field to equal the stored card PIN.
+ * Missing and wrong PIN produce the SAME 400 «Неверный пароль карты».
+ * Non-owner users: the pin is ignored entirely (behavior unchanged).
+ */
+export function requireOwnerPin(user, pin) {
+  if (!isOwnerRow(user)) return
+  const expected = user.card_pin === null || user.card_pin === undefined ? '' : String(user.card_pin)
+  const provided =
+    typeof pin === 'string' ? pin.trim() : pin === null || pin === undefined ? '' : String(pin).trim()
+  if (!expected || provided !== expected) throw bad('Неверный пароль карты')
 }
 
 /** User reference usable both flat and nested: {id, ..., user:{id,...}} (house style). */

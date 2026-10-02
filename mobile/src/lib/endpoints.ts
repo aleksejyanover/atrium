@@ -126,35 +126,36 @@ export const orgsApi = {
     return apiFetch(`/api/orgs/${id}/finance`);
   },
   /** Пополнить казначейство — списывает с личного баланса автора (rank ≥ 60). */
-  treasuryDeposit(id: string, amount: number): Promise<{ balance: number }> {
+  treasuryDeposit(id: string, amount: number, pin?: string): Promise<{ balance: number }> {
     return apiFetch(`/api/orgs/${id}/treasury/deposit`, {
       method: 'POST',
-      body: { amount },
+      body: pin !== undefined ? { amount, pin } : { amount },
     });
   },
   /** Выплатить зарплату из казначейства (rank ≥ 60). */
   payroll(
     id: string,
-    body: { userId: string; amount: number; note?: string },
+    body: { userId: string; amount: number; note?: string; pin?: string },
   ): Promise<{ orgBalance: number; payment: PaymentRow }> {
     return apiFetch(`/api/orgs/${id}/payroll`, { method: 'POST', body });
   },
 };
 
-/** Кошелёк: баланс, пополнение счёта картой, переводы (SPEC v4 §24). */
+/** Кошелёк: баланс, пополнение счёта картой, переводы (SPEC v4 §24).
+ *  У владельца в исходящие операции добавляется `pin` — пароль карты (SPEC v6 §32). */
 export const walletApi = {
   get(): Promise<WalletInfo> {
     return apiFetch('/api/wallet');
   },
   /** Пополнить счёт картой (SPEC v5 §30 — нейтральные банковские тексты). */
-  topup(body: { amount: number; cardNumber: string }): Promise<{
-    balance: number | null;
+  topup(body: { amount: number; cardNumber: string; pin?: string }): Promise<{
+    balance: number;
     demo: boolean;
   }> {
     return apiFetch('/api/wallet/topup', { method: 'POST', body });
   },
-  transfer(body: { toUserId: string; amount: number; note?: string }): Promise<{
-    balance: number | null;
+  transfer(body: { toUserId: string; amount: number; note?: string; pin?: string }): Promise<{
+    balance: number;
     payment: PaymentRow;
   }> {
     return apiFetch('/api/wallet/transfer', { method: 'POST', body });

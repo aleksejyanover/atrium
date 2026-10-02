@@ -389,10 +389,13 @@ const moneyChips = [500, 1000, 5000];
 function TreasuryDepositModal({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
   const { currentOrgId, toast, user, updateUser } = useApp();
   const [amount, setAmount] = useState('');
+  const [pin, setPin] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const value = Number(amount.replace(/\D/g, '') || 0);
+  // SPEC v6 §32: владелец подтверждает каждую исходящую операцию паролем карты
+  const isOwner = user?.isOwner === true;
 
   const submit = async () => {
     if (!currentOrgId) return;
@@ -400,16 +403,21 @@ function TreasuryDepositModal({ onClose, onDone }: { onClose: () => void; onDone
       setError('Сумма: положительное целое число');
       return;
     }
+    if (isOwner && pin.length !== 4) {
+      setError('Пароль карты: 4 цифры');
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
-      const res = await api.treasuryDeposit(currentOrgId, value);
+      const res = await api.treasuryDeposit(currentOrgId, value, isOwner ? pin : undefined);
       if (user) updateUser({ ...user, balance: res.userBalance });
       toast(`В казначейство переведено: ${formatRub(value)}`, 'success');
       onDone();
       onClose();
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) setError('Недостаточно средств');
+      // 400 «Неверный пароль карты» (SPEC v6 §32) показываем прямо в модалке
       else setError(e instanceof Error ? e.message : 'Не удалось пополнить казначейство');
     } finally {
       setBusy(false);
@@ -455,24 +463,43 @@ function TreasuryDepositModal({ onClose, onDone }: { onClose: () => void; onDone
           ))}
         </div>
         <span className="hint">
-          Доступно на личном балансе: {balanceText(user?.balance ?? null, user?.isOwner)}
+          Доступно на личном балансе: {balanceText(user?.balance)}
         </span>
       </div>
+      {isOwner && (
+        <div className="field">
+          <label>Пароль карты</label>
+          <input
+            className="input card-input"
+            inputMode="numeric"
+            pattern="[0-9]*"
+            autoComplete="off"
+            value={pin}
+            placeholder="••••"
+            maxLength={4}
+            onChange={(e) => setPin(e.target.value.replace(/\D/g, '').slice(0, 4))}
+          />
+          <span className="hint">Пароль запрашивается при каждой операции с деньгами</span>
+        </div>
+      )}
     </Modal>
   );
 }
 
 function PayrollModal({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
-  const { currentOrgId, detail, toast } = useApp();
+  const { currentOrgId, detail, toast, user } = useApp();
   const members = detail?.members ?? [];
   const [userId, setUserId] = useState(members[0]?.user.id ?? '');
   const [amount, setAmount] = useState('');
   const [note, setNote] = useState('');
+  const [pin, setPin] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const value = Number(amount.replace(/\D/g, '') || 0);
   const target = members.find((m) => m.user.id === userId) ?? null;
+  // SPEC v6 §32: владелец подтверждает каждую исходящую операцию паролем карты
+  const isOwner = user?.isOwner === true;
 
   const submit = async () => {
     if (!currentOrgId) return;
@@ -484,6 +511,10 @@ function PayrollModal({ onClose, onDone }: { onClose: () => void; onDone: () => 
       setError('Сумма: положительное целое число');
       return;
     }
+    if (isOwner && pin.length !== 4) {
+      setError('Пароль карты: 4 цифры');
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -491,12 +522,14 @@ function PayrollModal({ onClose, onDone }: { onClose: () => void; onDone: () => 
         userId: target.user.id,
         amount: value,
         ...(note.trim() ? { note: note.trim() } : {}),
+        ...(isOwner ? { pin } : {}),
       });
       toast(`Зарплата выплачена: ${formatRub(value)} → ${target.user.displayName}`, 'success');
       onDone();
       onClose();
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) setError('Недостаточно средств в казначестве');
+      // 400 «Неверный пароль карты» (SPEC v6 §32) показываем прямо в модалке
       else setError(e instanceof Error ? e.message : 'Не удалось выплатить зарплату');
     } finally {
       setBusy(false);
@@ -561,6 +594,22 @@ function PayrollModal({ onClose, onDone }: { onClose: () => void; onDone: () => 
           onChange={(e) => setNote(e.target.value)}
         />
       </div>
+      {isOwner && (
+        <div className="field">
+          <label>Пароль карты</label>
+          <input
+            className="input card-input"
+            inputMode="numeric"
+            pattern="[0-9]*"
+            autoComplete="off"
+            value={pin}
+            placeholder="••••"
+            maxLength={4}
+            onChange={(e) => setPin(e.target.value.replace(/\D/g, '').slice(0, 4))}
+          />
+          <span className="hint">Пароль запрашивается при каждой операции с деньгами</span>
+        </div>
+      )}
       {target && value > 0 && (
         <div className="summary-box">
           <div className="info-kv">

@@ -89,9 +89,9 @@ export interface ServerToClientEvents {
   }) => void;
   /** Новая запись истории действий (SPEC v3 §18). */
   'activity:new': (payload: { activity: ActivityEntry }) => void;
-  /** Баланс кошелька изменился — только владельцу счёта (SPEC v4 §24). */
+  /** Баланс кошелька изменился — только владельцу счёта (SPEC v4 §24, v6 §32 — число). */
   'wallet:updated': (payload: {
-    balance: number | null;
+    balance: number;
     reason?: 'topup' | 'transfer' | 'salary' | 'treasury_deposit';
     from?: User;
     amount?: number;

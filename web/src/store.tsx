@@ -299,7 +299,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setUser(next);
   }, []);
 
-  /** Свежая копия профиля: `GET /api/me` (isOwner, balance: null у владельца). */
+  /** Свежая копия профиля: `GET /api/me` (isOwner, balance — обычное число, card у владельца). */
   const refreshUser = useCallback(async () => {
     try {
       const { user: me } = await api.me();
@@ -556,9 +556,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
     const onWalletUpdated = (payload: unknown) => {
       if (!isRecord(payload)) return;
-      // SPEC v5 §29: у владельца сервер шлёт `balance: null` («∞»)
+      // SPEC v6 §32: баланс — обычное число у всех
       const next = payload.balance;
-      if (typeof next !== 'number' && next !== null) return;
+      if (typeof next !== 'number') return;
       const me = userRef.current;
       if (!me) return;
       setUser({ ...me, balance: next });

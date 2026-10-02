@@ -12,7 +12,7 @@ import { requireAuth, requireOrgMember, requireRank } from '../auth.js'
 import { logAudit } from '../audit.js'
 import { logActivity } from '../activity.js'
 import { emitToUser } from '../bus.js'
-import { bad, conflict, notFound, str, rub, publicUser, newId } from '../util.js'
+import { bad, conflict, notFound, str, rub, publicUser, newId, requireOwnerPin } from '../util.js'
 
 const router = Router()
 
@@ -69,7 +69,7 @@ const nameOf = (id) => (id ? findUserById(id)?.display_name || 'Пользова
 // ---------- personal wallet (SPEC v4 §24) ----------
 
 // GET /api/wallet -> {balance, demo:true, payments:[...]} — 30 latest operations
-// SPEC v5 §29: card owner balance is unlimited → null (∞ on the client)
+// SPEC v6 §32: the owner balance is a plain number too (v5's «null = ∞» cancelled)
 router.get('/wallet', requireAuth, (req, res, next) => {
   try {
     const rows = all(
@@ -81,7 +81,7 @@ router.get('/wallet', requireAuth, (req, res, next) => {
     )
     const user = findUserById(req.userId)
     res.json({
-      balance: user.is_owner ? null : (user.balance ?? 0),
+      balance: user.balance ?? 0,
       demo: true,
       payments: rows.map((r) => walletPaymentDto(r, req.userId)),
     })
@@ -90,12 +90,18 @@ router.get('/wallet', requireAuth, (req, res, next) => {
   }
 })
 
-// POST /api/wallet/topup {amount, cardNumber} -> {balance, payment, demo:true}
+// POST /api/wallet/topup {amount, cardNumber, pin?} -> {balance, payment, demo:true}
 // DEMO mode: no real charge; card_mask = '•••• ' + last 4 digits.
+// SPEC v6 §32: the card owner confirms with the card PIN; owner amount limits are
+// lifted (integer ≥ 1, no upper bound); non-owners keep 100–500 000 and no PIN.
 router.post('/wallet/topup', requireAuth, (req, res, next) => {
   try {
     const body = req.body || {}
-    const amount = amountOf(body.amount, 100, 500000, 'Сумма пополнения: 100–500 000 ₽')
+    const me = findUserById(req.userId)
+    requireOwnerPin(me, body.pin) // owner: PIN first (same 400 for missing/wrong)
+    const amount = me.is_owner
+      ? amountOf(body.amount, 1, Number.MAX_SAFE_INTEGER, 'Сумма пополнения: целое число от 1 ₽')
+      : amountOf(body.amount, 100, 500000, 'Сумма пополнения: 100–500 000 ₽')
     const cardNumber = String(body.cardNumber ?? '').replace(/[\s-]/g, '')
     if (!/^\d{16}$/.test(cardNumber)) throw bad('Номер карты: 16 цифр')
     const cardMask = `•••• ${cardNumber.slice(-4)}`
@@ -115,8 +121,8 @@ router.post('/wallet/topup', requireAuth, (req, res, next) => {
       )
       const row = get('SELECT * FROM payments WHERE id = ?', id)
       const user = findUserById(req.userId)
-      // SPEC v5 §29: owner balance is always reported as null (∞)
-      return { payment: row, balance: user.is_owner ? null : (user.balance ?? 0) }
+      // SPEC v6 §32: plain numeric balance for the owner as well
+      return { payment: row, balance: user.balance ?? 0 }
     })
 
     logAudit({
@@ -133,12 +139,18 @@ router.post('/wallet/topup', requireAuth, (req, res, next) => {
   }
 })
 
-// POST /api/wallet/transfer {toUserId, amount, note?} -> {balance, payment}
+// POST /api/wallet/transfer {toUserId, amount, note?, pin?} -> {balance, payment}
+// SPEC v6 §32: the card owner confirms with the card PIN and has no upper amount
+// bound; non-owners keep 1..500 000 and no PIN requirement.
 router.post('/wallet/transfer', requireAuth, (req, res, next) => {
   try {
     const body = req.body || {}
+    const initiator = findUserById(req.userId)
+    requireOwnerPin(initiator, body.pin) // owner: PIN first (same 400 for missing/wrong)
+    const amount = initiator.is_owner
+      ? amountOf(body.amount, 1, Number.MAX_SAFE_INTEGER, 'Сумма перевода: целое число от 1 ₽')
+      : amountOf(body.amount, 1, 500000, 'Сумма перевода: 1–500 000 ₽')
     const toUserId = str(body.toUserId)
-    const amount = amountOf(body.amount, 1, 500000, 'Сумма перевода: 1–500 000 ₽')
     const note = str(body.note) ?? ''
     if (note.length > 300) throw bad('Комментарий: не более 300 символов')
     if (!toUserId) throw bad('Укажите получателя')
@@ -149,8 +161,8 @@ router.post('/wallet/transfer', requireAuth, (req, res, next) => {
 
     const result = transaction(() => {
       const sender = findUserById(req.userId)
-      // SPEC v5 §29: card owner has unlimited funds — the check and the debit are skipped,
-      // the payment row is still recorded with its amount.
+      // SPEC v5 §29 / v6 §32: card owner has unlimited funds — the check and the debit
+      // are skipped, the payment row is still recorded with its amount.
       const infinite = !!sender.is_owner
       if (!infinite && (sender.balance ?? 0) < amount) throw conflict('Недостаточно средств')
       if (!infinite) run('UPDATE users SET balance = balance - ? WHERE id = ?', amount, req.userId)
@@ -169,7 +181,8 @@ router.post('/wallet/transfer', requireAuth, (req, res, next) => {
       )
       const row = get('SELECT * FROM payments WHERE id = ?', id)
       const after = findUserById(req.userId)
-      return { payment: row, balance: infinite ? null : (after.balance ?? 0) }
+      // SPEC v6 §32: plain numeric balance for the owner as well (never decremented)
+      return { payment: row, balance: after.balance ?? 0 }
     })
 
     const senderUser = findUserById(req.userId)
@@ -182,8 +195,8 @@ router.post('/wallet/transfer', requireAuth, (req, res, next) => {
       botSubject: toUserId,
     })
     emitToUser(toUserId, 'wallet:updated', {
-      // SPEC v5 §29: card owner balance is always reported as null (∞)
-      balance: recipient.is_owner ? null : (recipient.balance ?? 0) + amount,
+      // SPEC v6 §32: plain numeric balance for an owner recipient too
+      balance: (recipient.balance ?? 0) + amount,
       reason: 'transfer',
       from: publicUser(senderUser),
       amount,
@@ -241,15 +254,18 @@ router.get('/orgs/:id/finance', requireAuth, requireOrgMember, (req, res, next) 
   }
 })
 
-// POST /api/orgs/:id/treasury/deposit {amount} -> {balance} — rank >= 60,
+// POST /api/orgs/:id/treasury/deposit {amount, pin?} -> {balance} — rank >= 60,
 // debits the author's personal balance (kind 'treasury_deposit').
+// SPEC v6 §32: a card owner confirms the deposit with the card PIN.
 router.post('/orgs/:id/treasury/deposit', requireAuth, requireOrgMember, requireRank(60, 'Управление финансами доступно только админу'), (req, res, next) => {
   try {
-    const amount = amountOf(req.body?.amount, 1, 100000000, 'Сумма: положительное целое число (до 100 000 000 ₽)')
+    const body = req.body || {}
+    requireOwnerPin(findUserById(req.userId), body.pin) // owner: same 400 for missing/wrong
+    const amount = amountOf(body.amount, 1, 100000000, 'Сумма: положительное целое число (до 100 000 000 ₽)')
 
     const result = transaction(() => {
       const user = findUserById(req.userId)
-      // SPEC v5 §29: owner deposits from an unlimited balance — no check, no debit
+      // SPEC v5 §29 / v6 §32: owner deposits from an unlimited balance — no check, no debit
       const infinite = !!user.is_owner
       if (!infinite && (user.balance ?? 0) < amount) throw conflict('Недостаточно средств')
       if (!infinite) run('UPDATE users SET balance = balance - ? WHERE id = ?', amount, req.userId)
@@ -269,7 +285,8 @@ router.post('/orgs/:id/treasury/deposit', requireAuth, requireOrgMember, require
       const after = findUserById(req.userId)
       return {
         orgBalance: org.balance ?? 0,
-        userBalance: infinite ? null : (after.balance ?? 0),
+        // SPEC v6 §32: plain numeric balance for the owner as well (never decremented)
+        userBalance: after.balance ?? 0,
       }
     })
 
@@ -291,10 +308,12 @@ router.post('/orgs/:id/treasury/deposit', requireAuth, requireOrgMember, require
   }
 })
 
-// POST /api/orgs/:id/payroll {userId, amount, note?} -> {orgBalance, payment} — rank >= 60
+// POST /api/orgs/:id/payroll {userId, amount, note?, pin?} -> {orgBalance, payment} — rank >= 60
+// SPEC v6 §32: payroll initiated by a card owner requires the card PIN.
 router.post('/orgs/:id/payroll', requireAuth, requireOrgMember, requireRank(60, 'Выплаты доступны только админу'), (req, res, next) => {
   try {
     const body = req.body || {}
+    requireOwnerPin(findUserById(req.userId), body.pin) // payer is the acting user
     const targetId = str(body.userId)
     const amount = amountOf(body.amount, 1, 100000000, 'Сумма: положительное целое число (до 100 000 000 ₽)')
     const note = str(body.note) ?? ''
@@ -329,8 +348,8 @@ router.post('/orgs/:id/payroll', requireAuth, requireOrgMember, requireRank(60, 
       return {
         payment: row,
         orgBalance: orgAfter.balance ?? 0,
-        // SPEC v5 §29: card owner balance is reported as null (∞)
-        targetBalance: targetAfter.is_owner ? null : (targetAfter.balance ?? 0),
+        // SPEC v6 §32: plain numeric balance for an owner recipient as well
+        targetBalance: targetAfter.balance ?? 0,
       }
     })
 

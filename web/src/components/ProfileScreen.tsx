@@ -1,4 +1,4 @@
-/** Profile: identity, password, personal signature and the owner card (SPEC v3 §17, v5 §29/§30). */
+/** Profile: identity, password, personal signature and the owner card (SPEC v3 §17, v5 §29/§30, v6 §32). */
 
 import { useEffect, useRef, useState } from 'react';
 import { api, ApiError } from '../api';
@@ -41,6 +41,17 @@ function ownerSerial(id: string): string {
   return `OWNER-${tail}`;
 }
 
+/** «4242123456789012» → «•••• •••• •••• 9012» (маска номера карты, SPEC v6 §32). */
+function maskCardNumber(number: string): string {
+  const digits = number.replace(/\D/g, '');
+  return `•••• •••• •••• ${digits.slice(-4)}`;
+}
+
+/** «4242123456789012» → «4242 1234 5678 9012». */
+function groupCardNumber(number: string): string {
+  return number.replace(/\D/g, '').replace(/(\d{4})(?=\d)/g, '$1 ').trim();
+}
+
 export function ProfileScreen({ onOpenNav }: ScreenProps) {
   const { user, updateUser, refreshUser, toast, logout, setView } = useApp();
 
@@ -50,10 +61,11 @@ export function ProfileScreen({ onOpenNav }: ScreenProps) {
   const [profileBusy, setProfileBusy] = useState(false);
   const [profileError, setProfileError] = useState<string | null>(null);
 
-  /* ---- owner card (SPEC v5 §29) ---- */
+  /* ---- owner card (SPEC v5 §29, v6 §32) ---- */
   const [ownerCode, setOwnerCode] = useState('');
   const [ownerBusy, setOwnerBusy] = useState(false);
   const [ownerError, setOwnerError] = useState<string | null>(null);
+  const [showCardNumber, setShowCardNumber] = useState(false);
 
   /* ---- password ---- */
   const [currentPassword, setCurrentPassword] = useState('');
@@ -322,15 +334,8 @@ export function ProfileScreen({ onOpenNav }: ScreenProps) {
               <div className="muted" style={{ fontSize: 12 }}>
                 Баланс
               </div>
-              <div
-                className={
-                  user?.isOwner || user?.balance === null
-                    ? 'wallet-balance compact inf'
-                    : 'wallet-balance compact'
-                }
-              >
-                {balanceText(user?.balance, user?.isOwner)}
-              </div>
+              {/* SPEC v6 §32: баланс владельца — обычное число */}
+              <div className="wallet-balance compact">{balanceText(user?.balance)}</div>
             </div>
             <button className="btn btn-primary btn-sm" onClick={() => setView('wallet')}>
               Открыть кошелёк
@@ -353,7 +358,7 @@ export function ProfileScreen({ onOpenNav }: ScreenProps) {
           )}
         </div>
 
-        {/* ------------- карточка владельца (SPEC v5 §29/§30) ------------- */}
+        {/* ------------- карточка владельца (SPEC v5 §29/§30, v6 §32) ------------- */}
         <div className="info-card">
           <p className="panel-section-title" style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
             <CrownIcon size={13} /> Карточка владельца
@@ -396,8 +401,30 @@ export function ProfileScreen({ onOpenNav }: ScreenProps) {
                 </div>
                 <div className="owner-card-name">{user.displayName}</div>
                 <div className="owner-card-handle">@{user.username}</div>
+
+                {user.card && (
+                  <div className="owner-card-number">
+                    <div className="owner-card-number-label">Номер карты</div>
+                    <div className="owner-card-number-value">
+                      {showCardNumber
+                        ? groupCardNumber(user.card.number)
+                        : maskCardNumber(user.card.number)}
+                    </div>
+                    <button
+                      className="btn btn-ghost btn-sm owner-card-number-toggle"
+                      onClick={() => setShowCardNumber((v) => !v)}
+                    >
+                      {showCardNumber ? 'Скрыть номер' : 'Показать номер'}
+                    </button>
+                    <div className="owner-card-pin">
+                      Пароль карты: <span className="owner-card-pin-value">{user.card.pin}</span>
+                    </div>
+                    <div className="hint">Пароль запрашивается при каждой операции с деньгами</div>
+                  </div>
+                )}
+
                 <div className="owner-card-foot">
-                  <span className="owner-card-balance">Баланс: ∞</span>
+                  <span className="owner-card-balance">Баланс: {balanceText(user.balance)}</span>
                   <span className="owner-card-serial">{ownerSerial(user.id)}</span>
                 </div>
               </div>

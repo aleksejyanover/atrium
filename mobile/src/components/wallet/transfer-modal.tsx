@@ -14,23 +14,26 @@ const SEARCH_DEBOUNCE_MS = 300;
 
 interface Props {
   visible: boolean;
-  /** Текущий баланс — для итога «после перевода» (null — баланс не ограничен, SPEC v5 §29). */
+  /** Текущий баланс — для итога «после перевода» (обычное число, SPEC v6 §32). */
   balance: number | null;
   /** Мой id — не показывать себя в поиске получателей. */
   meId: string;
+  /** Владелец: требуется пароль карты, лимит суммы снят (SPEC v6 §32). */
+  isOwner: boolean;
   onClose(): void;
   /** Успешный перевод: родитель перечитывает кошелёк и показывает тост. */
   onDone(amount: number, to: User): void;
 }
 
 /** Модалка перевода другому пользователю (SPEC v4 §24). */
-export function TransferModal({ visible, balance, meId, onClose, onDone }: Props) {
+export function TransferModal({ visible, balance, meId, isOwner, onClose, onDone }: Props) {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<User[]>([]);
   const [searching, setSearching] = useState(false);
   const [selected, setSelected] = useState<User | null>(null);
   const [amount, setAmount] = useState('');
   const [note, setNote] = useState('');
+  const [pin, setPin] = useState('');
   const [busy, setBusy] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -65,10 +68,11 @@ export function TransferModal({ visible, balance, meId, onClose, onDone }: Props
   }, [query, visible, selected, meId]);
 
   const amountValue = parseInt(amount.replace(/\D/g, ''), 10) || 0;
-  // balance === null → владелец, проверка средств не нужна (SPEC v5 §29).
-  const unlimited = balance === null;
-  const after = unlimited ? null : balance - amountValue;
-  const insufficient = !unlimited && amountValue > 0 && after !== null && after < 0;
+  const currentBalance = balance ?? 0;
+  // Владелец: баланс не уменьшается от исходящих операций (SPEC v6 §32).
+  const after = isOwner ? currentBalance : currentBalance - amountValue;
+  const insufficient = !isOwner && amountValue > 0 && after < 0;
+  const amountLimit = isOwner ? 9 : 6;
 
   // Сброс полей при закрытии: состояние живёт, только пока модалка открыта.
   const reset = () => {
@@ -77,6 +81,7 @@ export function TransferModal({ visible, balance, meId, onClose, onDone }: Props
     setSelected(null);
     setAmount('');
     setNote('');
+    setPin('');
   };
   const close = () => {
     reset();
@@ -90,11 +95,12 @@ export function TransferModal({ visible, balance, meId, onClose, onDone }: Props
         toUserId: to.id,
         amount: value,
         note: note.trim() || undefined,
+        ...(isOwner ? { pin } : {}),
       });
       reset();
       onDone(value, to);
     } catch (e) {
-      // 409 «Недостаточно средств», 400/404 — серверное сообщение по-русски.
+      // 409 «Недостаточно средств», 400 «Неверный пароль карты», 404 — серверное сообщение.
       Alert.alert('Перевод', e instanceof Error ? e.message : 'Ошибка');
     } finally {
       setBusy(false);
@@ -106,8 +112,12 @@ export function TransferModal({ visible, balance, meId, onClose, onDone }: Props
       Alert.alert('Перевод', 'Найдите и выберите получателя');
       return;
     }
-    if (amountValue < 1 || amountValue > 500000) {
-      Alert.alert('Перевод', 'Сумма перевода: 1–500 000 ₽');
+    if (amountValue < 1 || (!isOwner && amountValue > 500000)) {
+      Alert.alert('Перевод', isOwner ? 'Сумма перевода: от 1 ₽' : 'Сумма перевода: 1–500 000 ₽');
+      return;
+    }
+    if (isOwner && pin.length !== 4) {
+      Alert.alert('Перевод', 'Введите пароль карты — 4 цифры');
       return;
     }
     if (insufficient) {
@@ -201,10 +211,10 @@ export function TransferModal({ visible, balance, meId, onClose, onDone }: Props
       <Field
         label="Сумма, ₽"
         value={amount}
-        onChangeText={(v) => setAmount(v.replace(/\D/g, '').slice(0, 6))}
-        placeholder="1 – 500 000"
+        onChangeText={(v) => setAmount(v.replace(/\D/g, '').slice(0, amountLimit))}
+        placeholder={isOwner ? 'От 1 ₽, без ограничений' : '1 – 500 000'}
         keyboardType="number-pad"
-        maxLength={6}
+        maxLength={amountLimit}
       />
       <Field
         label="Комментарий (необязательно)"
@@ -213,6 +223,18 @@ export function TransferModal({ visible, balance, meId, onClose, onDone }: Props
         placeholder="За что / за период"
         maxLength={300}
       />
+
+      {isOwner ? (
+        <Field
+          label="Пароль карты"
+          value={pin}
+          onChangeText={(v) => setPin(v.replace(/\D/g, '').slice(0, 4))}
+          placeholder="0000"
+          keyboardType="number-pad"
+          maxLength={4}
+          hint="Пароль запрашивается при каждой операции с деньгами"
+        />
+      ) : null}
 
       <View style={styles.total}>
         <Text style={styles.totalRow}>
@@ -225,7 +247,7 @@ export function TransferModal({ visible, balance, meId, onClose, onDone }: Props
         </Text>
         <Text style={[styles.totalRow, insufficient && { color: colors.danger }]}>
           <Text style={styles.totalLabel}>После перевода: </Text>
-          {insufficient ? 'Недостаточно средств' : unlimited ? '∞' : rub(Math.max(after ?? 0, 0))}
+          {insufficient ? 'Недостаточно средств' : rub(Math.max(after, 0))}
         </Text>
       </View>
     </AppModal>
