@@ -5,6 +5,7 @@
  * - automatic logout (token drop + redirect) on 401 of an authed request
  */
 
+import { apiUrl } from './config';
 import type {
   ActivityEntry,
   AdminStats,
@@ -76,7 +77,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const token = getToken();
   if (token) headers.set('Authorization', `Bearer ${token}`);
 
-  const res = await fetch(path, { ...init, headers });
+  const res = await fetch(apiUrl(path), { ...init, headers });
 
   // Auto-logout: only for requests that carried a token and were not auth attempts.
   if (res.status === 401 && token && !path.startsWith('/api/auth/')) {

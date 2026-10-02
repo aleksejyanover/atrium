@@ -32,12 +32,30 @@ else
 fi
 
 URL=$(grep -Eo "https://[a-z0-9.-]+\.serveo[a-z]*\.[a-z]+" /tmp/atrium-tunnel.log | tail -1)
-if [ -n "$URL" ]; then
-  echo ""
-  echo "=========================================="
-  echo "  Приложение доступно по ссылке:"
-  echo "  $URL"
-  echo "=========================================="
-else
-  echo "    URL не найден, смотрите лог: /tmp/atrium-tunnel.log"
+
+# GitHub Pages: фронт на Pages, API — через туннель (config.js).
+# Синхронизируем свежую сборку и подставляем актуальный адрес туннеля.
+PAGES="https://aleksejyanover.github.io/atrium/"
+if [ -d docs ] && [ -d web/dist ]; then
+  rsync -a --delete --exclude 'screenshot-register.png' web/dist/ docs/ > /dev/null 2>&1 || true
 fi
+if [ -n "$URL" ]; then
+  CFG="window.__ATRIUM_API__ = '$URL';"
+  if [ "$(cat docs/config.js 2>/dev/null)" != "$CFG" ]; then
+    echo "==> Обновляю адрес API на GitHub Pages..."
+    printf '%s\n' "$CFG" > docs/config.js
+    git add -A docs > /dev/null 2>&1 || true
+    git commit -m "deploy: API $URL" -- docs > /dev/null 2>&1 || true
+    git push origin main > /dev/null 2>&1 || echo "    (push не удался — повторит при следующем запуске)"
+    echo "    Pages подхватит изменения через ~1 минуту"
+  fi
+fi
+
+echo ""
+echo "=========================================="
+echo "  Приложение (постоянная ссылка):"
+echo "  $PAGES"
+if [ -n "$URL" ]; then
+  echo "  API-туннель: $URL"
+fi
+echo "=========================================="

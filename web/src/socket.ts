@@ -1,16 +1,20 @@
 /** Socket.IO singleton for the Atrium web client (SPEC §4). */
 
 import { io, type Socket } from 'socket.io-client';
+import { API_ORIGIN } from './config';
 
 /**
  * Same-origin by default: when the app is served by the Node server (incl. any
  * public tunnel URL) sockets go through the same host, and in `npm run dev`
- * the Vite proxy handles `/socket.io`. Override with `VITE_API_URL` if the
- * API lives elsewhere.
+ * the Vite proxy handles `/socket.io`. Priority: `VITE_API_URL` build-time
+ * override → runtime `window.__ATRIUM_API__` (config.js, split hosting) →
+ * this page's origin.
  */
 const apiOverride = (import.meta as unknown as { env?: Record<string, string> }).env?.VITE_API_URL;
 export const SOCKET_URL: string =
-  apiOverride || (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:4000');
+  apiOverride ||
+  API_ORIGIN ||
+  (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:4000');
 
 let socket: Socket | null = null;
 let socketToken: string | null = null;
