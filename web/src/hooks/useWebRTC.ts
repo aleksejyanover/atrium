@@ -63,7 +63,7 @@ const ICE_SERVERS: RTCIceServer[] = [
   { urls: ['stun:stun.cloudflare.com:3478', 'stun:stun.voipgate.com:3478',
            'stun:stun.sipgate.net:3478', 'stun:stun.l.google.com:19302'] },
   { urls: ['turn:openrelay.metered.ca:80', 'turn:openrelay.metered.ca:443',
-           'turn:openrelay.metered.ca:443?tcp'],
+           'turn:openrelay.metered.ca:443?transport=tcp'],
     username: 'openrelayproject', credential: 'openrelayproject' },
 ];
 
@@ -465,7 +465,16 @@ export function useWebRTC(socket: Socket | null, notify: Notify): WebRTCApi {
       setCall(invited);
       armRingTimer();
 
-      const pc = createPc(invited);
+      let pc: RTCPeerConnection;
+      try {
+        pc = createPc(invited);
+      } catch {
+        /* невалидная конфигурация ICE — раньше это роняло звонок молча */
+        notifyRef.current('Не удалось начать звонок', 'error');
+        void emitAck(socket, 'call:leave', { callId: invited.callId });
+        hardReset();
+        return;
+      }
       pcRef.current = pc;
       stream.getTracks().forEach((t) => pc.addTrack(t, stream));
       try {
@@ -513,7 +522,15 @@ export function useWebRTC(socket: Socket | null, notify: Notify): WebRTCApi {
     }
     localRef.current = stream;
     setLocalStream(stream);
-    const pc = createPc(c);
+    let pc: RTCPeerConnection;
+    try {
+      pc = createPc(c);
+    } catch {
+      notifyRef.current('Не удалось установить соединение', 'error');
+      void emitAck(socket, 'call:leave', { callId: c.callId });
+      hardReset();
+      return;
+    }
     pcRef.current = pc;
     stream.getTracks().forEach((t) => pc.addTrack(t, stream));
     const buffered = pendingSdpRef.current;

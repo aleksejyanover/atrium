@@ -35,7 +35,7 @@ const ICE_SERVERS: RTCIceServer[] = [
     urls: [
       'turn:openrelay.metered.ca:80',
       'turn:openrelay.metered.ca:443',
-      'turn:openrelay.metered.ca:443?tcp',
+      'turn:openrelay.metered.ca:443?transport=tcp',
     ],
     username: 'openrelayproject',
     credential: 'openrelayproject',

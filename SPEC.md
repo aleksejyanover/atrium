@@ -702,10 +702,15 @@ const ICE_SERVERS: RTCIceServer[] = [
   { urls: ['stun:stun.cloudflare.com:3478', 'stun:stun.voipgate.com:3478',
            'stun:stun.sipgate.net:3478', 'stun:stun.l.google.com:19302'] },
   { urls: ['turn:openrelay.metered.ca:80', 'turn:openrelay.metered.ca:443',
-           'turn:openrelay.metered.ca:443?tcp'],
+           'turn:openrelay.metered.ca:443?transport=tcp'],
     username: 'openrelayproject', credential: 'openrelayproject' },
 ];
 ```
+> **ФИКС звонков (v7):** только формат `?transport=tcp`. Вариант `?tcp`
+> невалиден — Chrome бросает исключение уже при конструировании
+> `RTCPeerConnection`, из-за чего звонок «само сбрасывался» через 20–30 секунд.
+> Клиенты (web/mobile) обёрнуты в try/catch: при ошибке конфигурации —
+> понятное уведомление, а не молчаливый сбой.
 2. Следить за `iceConnectionState`/`connectionState`: через 20с в состоянии
    connecting/без `connected` → показать понятную ошибку «Не удалось установить
    соединение. Проверьте интернет у собеседника» и завершить вызов (кнопкой
