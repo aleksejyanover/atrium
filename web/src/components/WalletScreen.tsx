@@ -7,6 +7,8 @@ import {
   balanceText,
   formatRub,
   paymentKindLabel,
+  type BankAccount,
+  type BankOp,
   type User,
   type WalletPayment,
 } from '../types';
@@ -52,6 +54,19 @@ function toAmount(value: string): number | null {
   if (!digits) return null;
   const n = Number(digits);
   return Number.isSafeInteger(n) ? n : null;
+}
+
+/** Ввод номера банковского счёта: все-цифры → группы по4 (до16), иначе IBAN (до20). */
+function maskBankInput(value: string): string {
+  const clean = value.replace(/[^A-Za-z0-9]/g, '').toUpperCase().slice(0, 20);
+  if (/^\d*$/.test(clean)) return clean.replace(/(\d{4})(?=\d)/g, '$1 ').trim();
+  return clean;
+}
+
+/**16-значная карта или20-символьный IBAN (как на сервере). */
+function isValidAccountNumber(value: string): boolean {
+  const clean = value.replace(/[^A-Za-z0-9]/g, '');
+  return /^\d{16}$/.test(clean) || /^[A-Za-z]{2}\d{2}[A-Za-z0-9]{18}$/.test(clean);
 }
 
 /* ============================================================
@@ -411,6 +426,210 @@ export function TransferModal({
 }
 
 /* ============================================================
+   Вывод на банковскую карту (SPEC v9 §40)
+   ============================================================ */
+
+export function BankWithdrawModal({
+  account,
+  onClose,
+  onDone,
+}: {
+  account: BankAccount;
+  onClose: () => void;
+  onDone: (balance: number) => void;
+}) {
+  const { toast, user } = useApp();
+  const isOwner = user?.isOwner === true;
+  const [amount, setAmount] = useState('');
+  const [pin, setPin] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const value = toAmount(amount);
+  const balance = user?.balance ?? 0;
+
+  const submit = async () => {
+    if (value === null || value < 1) {
+      setError('Сумма перевода: положительное целое число');
+      return;
+    }
+    if (!isOwner && value > balance) {
+      setError('Недостаточно средств');
+      return;
+    }
+    if (isOwner && pin.length !== 4) {
+      setError('Пароль карты: 4 цифры');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await api.bankWithdraw(value, isOwner ? pin : undefined);
+      toast(`Перевод на карту выполнен: −${formatRub(value)}`, 'success');
+      onDone(res.balance);
+      onClose();
+    } catch (e) {
+      // 400 «Неверный пароль карты» (§32–33), 409 «Недостаточно средств»
+      if (e instanceof ApiError && e.status === 409) setError('Недостаточно средств');
+      else setError(e instanceof Error ? e.message : 'Не удалось выполнить перевод');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal
+      title="Вывести на карту"
+      subtitle="Перевод на привязанный банковский счёт"
+      onClose={() => !busy && onClose()}
+      footer={
+        <>
+          <button className="btn btn-ghost" disabled={busy} onClick={onClose}>
+            Отмена
+          </button>
+          <button className="btn btn-primary" disabled={busy} onClick={() => void submit()}>
+            {busy ? 'Перевод…' : 'Перевести'}
+          </button>
+        </>
+      }
+    >
+      {error && <div className="form-error">{error}</div>}
+
+      <div className="field">
+        <label>Сумма, ₽</label>
+        <input
+          className="input"
+          inputMode="numeric"
+          value={amount}
+          placeholder="1000"
+          autoFocus
+          onChange={(e) =>
+            setAmount(e.target.value.replace(/\D/g, '').slice(0, isOwner ? 12 : 6))
+          }
+        />
+        {!isOwner && <span className="hint">Доступно: {balanceText(balance)}</span>}
+      </div>
+
+      <div className="summary-box">
+        <div className="info-kv">
+          <span className="k">Карта получателя</span>
+          <span className="v">
+            {account.bank} · {account.numberMasked}
+          </span>
+        </div>
+        <div className="info-kv">
+          <span className="k">Держатель</span>
+          <span className="v">{account.holder}</span>
+        </div>
+      </div>
+
+      {isOwner && (
+        <div className="field">
+          <label>Пароль карты</label>
+          <input
+            className="input card-input"
+            inputMode="numeric"
+            pattern="[0-9]*"
+            autoComplete="off"
+            value={pin}
+            placeholder="••••"
+            maxLength={4}
+            onChange={(e) => setPin(e.target.value.replace(/\D/g, '').slice(0, 4))}
+          />
+          <span className="hint">Пароль запрашивается при каждой операции с деньгами</span>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+/* ============================================================
+   Пополнение с привязанной банковской карты (SPEC v9 §40)
+   ============================================================ */
+
+export function BankTopupModal({
+  account,
+  onClose,
+  onDone,
+}: {
+  account: BankAccount;
+  onClose: () => void;
+  onDone: (balance: number) => void;
+}) {
+  const { toast } = useApp();
+  const [amount, setAmount] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const value = toAmount(amount);
+
+  const submit = async () => {
+    if (value === null || value < 1 || value > 5000000) {
+      setError('Сумма пополнения: от 1 до 5 000 000 ₽');
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await api.bankTopup(value);
+      toast(`Средства зачислены: +${formatRub(value)}`, 'success');
+      onDone(res.balance);
+      onClose();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Не удалось пополнить счёт');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal
+      title="Пополнить с карты"
+      subtitle="Зачисление на счёт в приложении"
+      onClose={() => !busy && onClose()}
+      footer={
+        <>
+          <button className="btn btn-ghost" disabled={busy} onClick={onClose}>
+            Отмена
+          </button>
+          <button className="btn btn-primary" disabled={busy} onClick={() => void submit()}>
+            {busy ? 'Зачисление…' : 'Пополнить'}
+          </button>
+        </>
+      }
+    >
+      {error && <div className="form-error">{error}</div>}
+
+      <div className="field">
+        <label>Сумма, ₽</label>
+        <input
+          className="input"
+          inputMode="numeric"
+          value={amount}
+          placeholder="1000"
+          autoFocus
+          onChange={(e) => setAmount(e.target.value.replace(/\D/g, '').slice(0, 7))}
+        />
+        <span className="hint">От1 до5 000 000 ₽ за одну операцию</span>
+      </div>
+
+      <div className="summary-box">
+        <div className="info-kv">
+          <span className="k">Карта списания</span>
+          <span className="v">
+            {account.bank} · {account.numberMasked}
+          </span>
+        </div>
+        <div className="info-kv">
+          <span className="k">Держатель</span>
+          <span className="v">{account.holder}</span>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+/* ============================================================
    Строка истории операций
    ============================================================ */
 
@@ -425,6 +644,8 @@ function kindIcon(p: WalletPayment) {
   if (p.kind === 'topup') return <CreditCardIcon size={16} />;
   if (p.kind === 'transfer') return <ArrowRightIcon size={16} />;
   if (p.kind === 'salary') return <ArrowDownLeftIcon size={16} />;
+  if (p.kind === 'bank_withdraw') return <ArrowUpRightIcon size={16} />;
+  if (p.kind === 'bank_topup') return <ArrowDownLeftIcon size={16} />;
   return <ArrowUpRightIcon size={16} />;
 }
 
@@ -473,6 +694,16 @@ export function WalletScreen({ onOpenNav }: ScreenProps) {
   const [showTopup, setShowTopup] = useState(false);
   const [showTransfer, setShowTransfer] = useState(false);
 
+  // SPEC v9 §40: банковский счёт + его операции
+  const [bank, setBank] = useState<{ account: BankAccount | null; ops: BankOp[] } | null>(null);
+  const [showBankWithdraw, setShowBankWithdraw] = useState(false);
+  const [showBankTopup, setShowBankTopup] = useState(false);
+  const [accNumber, setAccNumber] = useState('');
+  const [accHolder, setAccHolder] = useState('');
+  const [accBank, setAccBank] = useState('');
+  const [accBusy, setAccBusy] = useState(false);
+  const [accError, setAccError] = useState<string | null>(null);
+
   // SPEC v6 §32: баланс — обычное число у всех, особой отметки для владельца нет
   const balanceDisplay = balance === null ? '…' : formatRub(balance);
 
@@ -484,17 +715,26 @@ export function WalletScreen({ onOpenNav }: ScreenProps) {
     [user, updateUser],
   );
 
+  const loadBank = useCallback(async () => {
+    try {
+      setBank(await api.getBank());
+    } catch {
+      setBank({ account: null, ops: [] });
+    }
+  }, []);
+
   const load = useCallback(async () => {
     try {
       const data = await api.wallet();
       setBalance(data.balance);
       setPayments(data.payments);
       if (user) updateUser({ ...user, balance: data.balance });
+      void loadBank();
     } catch (e) {
       setPayments([]);
       toast(e instanceof Error ? e.message : 'Не удалось загрузить кошелёк', 'error');
     }
-  }, [user, updateUser, toast]);
+  }, [user, updateUser, toast, loadBank]);
 
   useEffect(() => {
     void load();
@@ -511,6 +751,52 @@ export function WalletScreen({ onOpenNav }: ScreenProps) {
       socket.off('wallet:updated', onWallet);
     };
   }, [socket, load]);
+
+  /* ---- привязка/отвязка банковского счёта ---- */
+
+  const linkAccount = async () => {
+    if (!isValidAccountNumber(accNumber)) {
+      setAccError('Номер карты:16 цифр или IBAN (20 символов)');
+      return;
+    }
+    const holder = accHolder.trim();
+    if (!holder) {
+      setAccError('Укажите имя держателя');
+      return;
+    }
+    const bankName = accBank.trim();
+    if (!bankName) {
+      setAccError('Укажите название банка');
+      return;
+    }
+    setAccBusy(true);
+    setAccError(null);
+    try {
+      await api.linkBankAccount(accNumber, holder, bankName);
+      toast('Банковский счёт привязан', 'success');
+      setAccNumber('');
+      setAccHolder('');
+      setAccBank('');
+      await loadBank();
+    } catch (e) {
+      setAccError(e instanceof Error ? e.message : 'Не удалось привязать счёт');
+    } finally {
+      setAccBusy(false);
+    }
+  };
+
+  const unlinkAccount = async () => {
+    setAccBusy(true);
+    try {
+      await api.unlinkBankAccount();
+      toast('Банковский счёт отвязан', 'success');
+      await loadBank();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : 'Не удалось отвязать счёт', 'error');
+    } finally {
+      setAccBusy(false);
+    }
+  };
 
   return (
     <div className="screen">
@@ -540,6 +826,109 @@ export function WalletScreen({ onOpenNav }: ScreenProps) {
           </div>
         </div>
 
+        {/* SPEC v9 §40: банковский счёт — вывод на карту и пополнение с неё */}
+        <p className="panel-section-title" style={{ marginTop: 20 }}>
+          Банковский счёт
+        </p>
+
+        {bank === null ? (
+          <div className="empty-state">Загрузка…</div>
+        ) : bank.account === null ? (
+          <div className="summary-box">
+            <div className="hint" style={{ marginBottom: 4 }}>
+              Привяжите карту, чтобы выводить деньги на свой банковский счёт и
+              пополнять счёт в приложении с неё
+            </div>
+            {accError && <div className="form-error">{accError}</div>}
+            <div className="field">
+              <label>Номер карты</label>
+              <input
+                className="input card-input"
+                autoComplete="cc-number"
+                value={accNumber}
+                placeholder="0000 0000 0000 0000"
+                onChange={(e) => {
+                  setAccNumber(maskBankInput(e.target.value));
+                  setAccError(null);
+                }}
+              />
+              <span className="hint">Номер не сохраняется — только маска и последние4 цифры</span>
+            </div>
+            <div className="field">
+              <label>Имя держателя</label>
+              <input
+                className="input"
+                value={accHolder}
+                placeholder="Иванов Иван"
+                maxLength={100}
+                onChange={(e) => {
+                  setAccHolder(e.target.value);
+                  setAccError(null);
+                }}
+              />
+            </div>
+            <div className="field">
+              <label>Банк</label>
+              <input
+                className="input"
+                value={accBank}
+                placeholder="Название банка"
+                maxLength={100}
+                onChange={(e) => {
+                  setAccBank(e.target.value);
+                  setAccError(null);
+                }}
+              />
+            </div>
+            <button className="btn btn-primary" disabled={accBusy} onClick={() => void linkAccount()}>
+              {accBusy ? 'Привязка…' : 'Привязать счёт'}
+            </button>
+          </div>
+        ) : (
+          <div className="summary-box">
+            <div className="info-kv">
+              <span className="k">Карта</span>
+              <span className="v">
+                {bank.account.bank} · {bank.account.numberMasked}
+              </span>
+            </div>
+            <div className="info-kv">
+              <span className="k">Держатель</span>
+              <span className="v">{bank.account.holder}</span>
+            </div>
+            <div className="wallet-actions" style={{ marginTop: 12 }}>
+              <button className="btn btn-primary" onClick={() => setShowBankWithdraw(true)}>
+                <ArrowUpRightIcon size={15} /> Вывести на карту
+              </button>
+              <button className="btn btn-ghost" onClick={() => setShowBankTopup(true)}>
+                <ArrowDownLeftIcon size={15} /> Пополнить с карты
+              </button>
+              <button className="btn btn-ghost" disabled={accBusy} onClick={() => void unlinkAccount()}>
+                Отвязать
+              </button>
+            </div>
+            {bank.ops.length > 0 && (
+              <div style={{ marginTop: 14 }}>
+                <div className="hint" style={{ marginBottom: 6 }}>
+                  Банковские операции
+                </div>
+                {bank.ops.slice(0, 3).map((op) => (
+                  <div className="info-kv" key={op.id}>
+                    <span className="k">
+                      {op.type === 'withdraw' ? 'Вывод' : 'Пополнение'} · •••• {op.accountLast4} ·{' '}
+                      {timeFmt.format(op.createdAt)}
+                    </span>
+                    <span className="v">
+                      {op.type === 'withdraw' ? '−' : '+'}
+                      {formatRub(op.amount)} · Исполнено
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
         <p className="panel-section-title" style={{ marginTop: 20 }}>
           История операций
         </p>
@@ -566,6 +955,26 @@ export function WalletScreen({ onOpenNav }: ScreenProps) {
         <TransferModal
           onClose={() => setShowTransfer(false)}
           onDone={(b) => applyBalance(b)}
+        />
+      )}
+      {showBankWithdraw && bank?.account && (
+        <BankWithdrawModal
+          account={bank.account}
+          onClose={() => setShowBankWithdraw(false)}
+          onDone={(b) => {
+            applyBalance(b);
+            void loadBank();
+          }}
+        />
+      )}
+      {showBankTopup && bank?.account && (
+        <BankTopupModal
+          account={bank.account}
+          onClose={() => setShowBankTopup(false)}
+          onDone={(b) => {
+            applyBalance(b);
+            void loadBank();
+          }}
         />
       )}
     </div>

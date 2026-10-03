@@ -12,6 +12,8 @@ import type {
   AdminUserRow,
   AuditItem,
   AuthResponse,
+  BankAccount,
+  BankOp,
   BotSettings,
   Channel,
   DiscoverOrg,
@@ -776,6 +778,48 @@ export const api = {
     });
   },
 
+  /* ---- банковский счёт (SPEC v9 §40) ---- */
+
+  /** Привязанный счёт + операции по нему. */
+  getBank(): Promise<{ account: BankAccount | null; ops: BankOp[] }> {
+    return get<{ account: BankAccount | null; ops: BankOp[] }>('/api/wallet/bank');
+  },
+
+  /** Привязать/заменить банковский счёт (номер не сохраняется — только маска). */
+  linkBankAccount(
+    number: string,
+    holder: string,
+    bank: string,
+  ): Promise<{ ok: true; account: BankAccount }> {
+    return post<{ ok: true; account: BankAccount }>('/api/wallet/bank/account', {
+      number,
+      holder,
+      bank,
+    });
+  },
+
+  unlinkBankAccount(): Promise<{ ok: true }> {
+    return del<{ ok: true }>('/api/wallet/bank/account');
+  },
+
+  /** Вывод на привязанную карту; `pin` обязателен для владельца (§32–33). */
+  bankWithdraw(
+    amount: number,
+    pin?: string,
+  ): Promise<{ ok: true; op: BankOp; balance: number }> {
+    return post<{ ok: true; op: BankOp; balance: number }>('/api/wallet/bank/withdraw', {
+      amount,
+      ...(pin ? { pin } : {}),
+    });
+  },
+
+  /** Пополнение счёта в приложении с привязанной банковской карты (PIN не нужен). */
+  bankTopup(amount: number): Promise<{ ok: true; op: BankOp; balance: number }> {
+    return post<{ ok: true; op: BankOp; balance: number }>('/api/wallet/bank/topup', {
+      amount,
+    });
+  },
+
   /** Treasury of an org (rank ≥ 60) or my own credits from it (member). */
   async orgFinance(orgId: string): Promise<OrgFinance> {
     const res = await get<{
@@ -894,6 +938,44 @@ export const api = {
    */
   openDM(userId: string): Promise<{ channel: Channel; peer: User }> {
     return post<{ channel: Channel; peer: User }>('/api/dms', { userId });
+  },
+
+  /* ---------------- channel moderator bot (SPEC v9 §37) ---------------- */
+
+  /**
+   * Добавить бота-модератора в канал (права: участник канала rank ≥ 60) —
+   * `POST /api/orgs/:orgId/channels/:channelId/bot` → `{ok, already?}`;
+   * 403/404 приходят с русским текстом и показываются тостом.
+   */
+  addChannelBot(orgId: string, channelId: string): Promise<{ ok: true; already?: boolean }> {
+    return post<{ ok: true; already?: boolean }>(
+      `/api/orgs/${orgId}/channels/${channelId}/bot`,
+    );
+  },
+
+  /** Убрать бота-модератора из канала (те же права) → `{ok:true}`. */
+  removeChannelBot(orgId: string, channelId: string): Promise<{ ok: true }> {
+    return del<{ ok: true }>(`/api/orgs/${orgId}/channels/${channelId}/bot`);
+  },
+
+  /**
+   * Статус бота в канале: `GET …/bot` → `{inChannel:boolean}`.
+   * Терпимо к полю `botInChannel` в списочных ответах, если сервер его добавит.
+   */
+  async channelBotStatus(orgId: string, channelId: string): Promise<boolean> {
+    const res = await get<{ inChannel?: unknown; botInChannel?: unknown }>(
+      `/api/orgs/${orgId}/channels/${channelId}/bot`,
+    );
+    const value = res.inChannel !== undefined ? res.inChannel : res.botInChannel;
+    return value === true;
+  },
+
+  /**
+   * Оценка переписки (SPEC v9 §37.8): бот публикует в канал
+   * «📊 Оценка переписки: …» (права: участник канала rank ≥ 60).
+   */
+  channelModerationRating(orgId: string, channelId: string): Promise<{ ok: true }> {
+    return post<{ ok: true }>(`/api/orgs/${orgId}/channels/${channelId}/moderation/rating`);
   },
 };
 

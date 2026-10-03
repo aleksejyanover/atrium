@@ -21,6 +21,7 @@ import applicationRoutes from './routes/applications.js'
 import documentRoutes from './routes/documents.js'
 import walletRoutes from './routes/wallet.js'
 import adminRoutes from './routes/admin.js'
+import moderationRoutes from './routes/moderation.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const PORT = Number(process.env.PORT) || 4000
@@ -58,6 +59,7 @@ app.use('/api', applicationRoutes)
 app.use('/api', documentRoutes)
 app.use('/api', walletRoutes)
 app.use('/api', adminRoutes)
+app.use('/api', moderationRoutes)
 
 // 404 for unknown API routes (JSON, not HTML)
 app.use('/api', (req, res) => {

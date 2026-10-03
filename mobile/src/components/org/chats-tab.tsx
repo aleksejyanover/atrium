@@ -5,17 +5,20 @@ import { Alert, Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } 
 import { Avatar } from '@/components/avatar';
 import { Button, Empty, Field } from '@/components/controls';
 import { AppModal } from '@/components/modal';
-import { orgsApi } from '@/lib/endpoints';
+import { moderationApi, orgsApi } from '@/lib/endpoints';
 import { getOpenChannelId, subscribeReadState } from '@/lib/read-state';
 import { colors, radius } from '@/lib/theme';
 import { Channel, DMItem } from '@/lib/types';
 import { useSocket, useSocketEvent } from '@/state/socket';
+import { useToast } from '@/state/toast';
 
 interface Props {
   orgId: string;
   channels: Channel[];
   dms: DMItem[];
   canCreate: boolean;
+  /** Управлять ботом-модератором — rank ≥ 60 (SPEC v9 §37). */
+  canManageBot: boolean;
   onOpen(channelId: string): void;
   onRefresh(): Promise<void>;
   onChannelCreated(channel: Channel): void;
@@ -83,14 +86,17 @@ export function ChatsTab({
   channels,
   dms,
   canCreate,
+  canManageBot,
   onOpen,
   onRefresh,
   onChannelCreated,
 }: Props) {
   const { isOnline } = useSocket();
+  const { show } = useToast();
   const [createOpen, setCreateOpen] = useState(false);
   const [channelName, setChannelName] = useState('');
   const [creating, setCreating] = useState(false);
+  const [botBusy, setBotBusy] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const unreadOf = useUnreadCounts();
 
@@ -111,6 +117,59 @@ export function ChatsTab({
     } finally {
       setCreating(false);
     }
+  };
+
+  /* ---- SPEC v9 §37: бот-модератор ---- */
+
+  const runBotAction = async (
+    channel: Channel,
+    action: 'add' | 'remove' | 'rate',
+  ): Promise<void> => {
+    if (botBusy) return;
+    setBotBusy(true);
+    try {
+      if (action === 'add') {
+        await moderationApi.addBot(orgId, channel.id);
+        show(`Бот-модератор добавлен в #${channel.name}`);
+      } else if (action === 'remove') {
+        await moderationApi.removeBot(orgId, channel.id);
+        show(`Бот-модератор убран из #${channel.name}`);
+      } else {
+        await moderationApi.requestRating(orgId, channel.id);
+        show('Бот опубликовал оценку переписки в канале');
+      }
+      await onRefresh();
+    } catch (e) {
+      Alert.alert('Бот-модератор', e instanceof Error ? e.message : 'Ошибка');
+    } finally {
+      setBotBusy(false);
+    }
+  };
+
+  const botAction = (channel: Channel) => {
+    const inChannel = channel.botInChannel === true;
+    Alert.alert(
+      `Бот-модератор · #${channel.name}`,
+      inChannel
+        ? 'Бот следит за перепиской и удаляет нецензурные сообщения'
+        : 'Бот не добавлен в этот канал',
+      [
+        { text: 'Отмена', style: 'cancel' },
+        inChannel
+          ? {
+              text: 'Убрать бота',
+              style: 'destructive',
+              onPress: () => void runBotAction(channel, 'remove'),
+            }
+          : {
+              text: 'Добавить бота',
+              onPress: () => void runBotAction(channel, 'add'),
+            },
+        ...(inChannel
+          ? [{ text: 'Оценить переписку', onPress: () => void runBotAction(channel, 'rate') }]
+          : []),
+      ],
+    );
   };
 
   return (
@@ -165,6 +224,19 @@ export function ChatsTab({
                   {channel.name}
                 </Text>
                 <UnreadBadge count={unread} />
+                {canManageBot ? (
+                  <Pressable
+                    onPress={() => botAction(channel)}
+                    hitSlop={8}
+                    disabled={botBusy}
+                    style={[styles.botChip, channel.botInChannel === true && styles.botChipOn]}>
+                    <Feather
+                      name="cpu"
+                      size={12}
+                      color={channel.botInChannel === true ? colors.accent : colors.muted}
+                    />
+                  </Pressable>
+                ) : null}
                 <Feather name="chevron-right" size={18} color={colors.muted} />
               </Pressable>
             );
@@ -315,6 +387,20 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 11,
     fontWeight: '700',
+  },
+  botChip: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.panel2,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  botChipOn: {
+    borderColor: 'rgba(124,108,246,0.6)',
+    backgroundColor: 'rgba(124,108,246,0.12)',
   },
   hint: {
     color: colors.muted,

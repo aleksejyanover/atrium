@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Switch, Text, View } from 'react-native';
 import { useRouter, useFocusEffect, useLocalSearchParams } from 'expo-router';
 
@@ -13,9 +13,11 @@ import { Button, Field } from '@/components/controls';
 import { AppModal } from '@/components/modal';
 import { applicationsApi, chatApi, dismissalsApi, invitesApi, orgsApi } from '@/lib/endpoints';
 import { pluralizeMembers } from '@/lib/format';
+import { withRetry } from '@/lib/retry';
 import {
   canCreateChannel,
   canEditOrg,
+  canManageModeration,
   canReviewApplications,
   canReviewDismissals,
   canViewOrgInvites,
@@ -30,7 +32,7 @@ import {
   OrgDismissalItem,
 } from '@/lib/types';
 import { useAuth } from '@/state/auth';
-import { useSocketEvent } from '@/state/socket';
+import { useSocket, useSocketEvent } from '@/state/socket';
 import { useToast } from '@/state/toast';
 
 type TabKey = 'chats' | 'members' | 'invites' | 'activity' | 'applications' | 'finance';
@@ -69,7 +71,9 @@ function OrgScreen() {
   const refresh = useCallback(async () => {
     if (!id) return;
     try {
-      const orgDetail = await orgsApi.get(id);
+      // SPEC v9 §39: сбой загрузки (обрыв сети/рестарт сервера) повторяется
+      // с backoff, а не оставляет пустой экран навсегда
+      const orgDetail = await withRetry(() => orgsApi.get(id));
       setDetail(orgDetail);
       setError(null);
       const [dmsRes, incomingRes] = await Promise.all([chatApi.dms(), invitesApi.mine()]);
@@ -105,6 +109,7 @@ function OrgScreen() {
         setDismissals([]);
       }
     } catch (e) {
+      // старый detail НЕ затираем: ошибка показывается только если данных ещё нет
       setError(e instanceof Error ? e.message : 'Не удалось открыть организацию');
     } finally {
       setLoading(false);
@@ -116,6 +121,24 @@ function OrgScreen() {
       void refresh();
     }, [refresh]),
   );
+
+  // SPEC v9 §39: после реконнекта сокета догоняем пропущенное (участники,
+  // каналы, приглашения) — не чаще одного раза в 10 секунд
+  const { socket } = useSocket();
+  useEffect(() => {
+    if (!socket) return;
+    let lastHealAt = Date.now(); // первый connect сразу после монтирования пропускаем — refresh уже выполнился в useFocusEffect
+    const onConnect = () => {
+      const now = Date.now();
+      if (now - lastHealAt < 10000) return;
+      lastHealAt = now;
+      void refresh();
+    };
+    socket.on('connect', onConnect);
+    return () => {
+      socket.off('connect', onConnect);
+    };
+  }, [socket, refresh]);
 
   // keep the org screen fresh when something changes elsewhere
   useSocketEvent('channel:created', (payload) => {
@@ -204,12 +227,21 @@ function OrgScreen() {
     );
   }
 
-  if (error || !detail) {
+  if (!detail) {
     return (
       <View style={styles.screen}>
         <ScreenHeader title="Организация" onBack={() => router.back()} />
         <View style={styles.center}>
           <Text style={styles.error}>{error ?? 'Не удалось открыть организацию'}</Text>
+          <Button
+            title="Повторить"
+            icon="refresh-cw"
+            onPress={() => {
+              setLoading(true);
+              setError(null);
+              void refresh();
+            }}
+          />
           <Pressable onPress={() => router.back()}>
             <Text style={styles.backLink}>Назад</Text>
           </Pressable>
@@ -285,12 +317,31 @@ function OrgScreen() {
       </View>
 
       <View style={{ flex: 1 }}>
+        {/* SPEC v9 §39: сбой обновления при уже загруженных данных — деликатный
+            баннер сверху, экран и каналы остаются на месте */}
+        {error ? (
+          <View style={styles.errorBanner}>
+            <Text style={styles.errorBannerText} numberOfLines={2}>
+              {error}
+            </Text>
+            <Pressable
+              onPress={() => {
+                setError(null);
+                void refresh();
+              }}
+              hitSlop={8}>
+              <Text style={styles.errorBannerAction}>Повторить</Text>
+            </Pressable>
+          </View>
+        ) : null}
+
         {activeTab === 'chats' ? (
           <ChatsTab
             orgId={detail.org.id}
             channels={detail.channels}
             dms={dms}
             canCreate={canCreateChannel(detail.role)}
+            canManageBot={canManageModeration(detail.role)}
             onOpen={openChat}
             onRefresh={refresh}
             onChannelCreated={() => void refresh()}
@@ -391,6 +442,30 @@ const styles = StyleSheet.create({
     color: colors.danger,
     fontSize: 14,
     textAlign: 'center',
+  },
+  errorBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+    backgroundColor: 'rgba(240,80,110,0.08)',
+    borderColor: 'rgba(240,80,110,0.35)',
+    borderWidth: 1,
+    borderRadius: radius.md,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    marginHorizontal: 16,
+    marginTop: 10,
+  },
+  errorBannerText: {
+    color: colors.danger,
+    fontSize: 12,
+    flexShrink: 1,
+  },
+  errorBannerAction: {
+    color: colors.accent,
+    fontSize: 13,
+    fontWeight: '700',
   },
   backLink: {
     color: colors.accent,

@@ -8,10 +8,14 @@ import {
   touchChannelRead,
   run,
   get,
+  BOT_ID,
 } from './db.js'
 import { requireChannelAccess } from './access.js'
 import { newId, publicUser, str } from './util.js'
 import { HttpError } from './util.js'
+import { findViolation, recordChannelStat, warnAuthor } from './moderation.js'
+import { botSendMessage } from './bot.js'
+import { logAudit } from './audit.js'
 
 // ---------- presence ----------
 const socketsByUser = new Map() // userId -> Set<socketId>
@@ -300,7 +304,7 @@ export function initSockets(io) {
         if (!channelId) throw new HttpError(400, 'Укажите канал')
         if (!text || text.length > 4000) throw new HttpError(400, 'Сообщение: 1–4000 символов')
 
-        requireChannelAccess(channelId, user.id)
+        const { channel } = requireChannelAccess(channelId, user.id)
 
         const id = newId('m')
         const createdAt = Date.now()
@@ -332,7 +336,36 @@ export function initSockets(io) {
             emitToUser(io, uid, 'message:new', { message: rest })
           }
         }
-        reply({ ok: true, message })
+
+        // ---------- SPEC v9 §37: авто-модерация (канал с ботом) ----------
+        let moderated = false
+        if (channel.type === 'channel' && memberIds.includes(BOT_ID) && user.id !== BOT_ID) {
+          recordChannelStat(channelId, { message: true })
+          if (findViolation(text)) {
+            moderated = true
+            recordChannelStat(channelId, { violation: true })
+            run('DELETE FROM messages WHERE id = ?', id)
+            for (const uid of memberIds) {
+              emitToUser(io, uid, 'message:deleted', { messageId: id, channelId })
+            }
+            const title = `#${channel.name || 'канал'}`
+            botSendMessage(channelId, '🤖 Сообщение удалено модератором: нецензурная лексика')
+            warnAuthor(user.id, title)
+            logAudit({
+              actorId: BOT_ID,
+              action: 'moderation.delete',
+              targetUserId: user.id,
+              details: `Сообщение в ${title} удалено модератором (нецензурная лексика)`,
+              botText: `🤖 Модерация: сообщение в ${title} удалено (нецензурная лексика)`,
+              botSubject: user.username,
+            })
+          }
+        }
+
+        // moderated: the message was already broadcast and deleted — the ack
+        // must NOT carry it back (clients reconcile tempId from this reply)
+        if (moderated) reply({ ok: true, moderated: true })
+        else reply({ ok: true, message })
       } catch (err) {
         reply({ error: err.message || 'Не удалось отправить сообщение' })
       }

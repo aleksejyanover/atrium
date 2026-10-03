@@ -30,6 +30,9 @@ export function Sidebar({ open, onNavigate }: SidebarProps) {
     orgs,
     currentOrgId,
     detail,
+    detailLoading,
+    detailError,
+    refreshDetail,
     dms,
     dmsLoaded,
     invites,
@@ -171,6 +174,27 @@ export function Sidebar({ open, onNavigate }: SidebarProps) {
               </button>
             )}
           </div>
+          {/* SPEC v9 §39: скелетон и ошибка вместо «пропадающих» каналов */}
+          {detailLoading && detail === null && (
+            <div aria-busy="true">
+              <div className="side-skeleton" />
+              <div className="side-skeleton" />
+              <div className="side-skeleton" />
+              <div className="empty-state">Загрузка каналов…</div>
+            </div>
+          )}
+          {!detailLoading && detailError && detail === null && (
+            <div className="empty-state">
+              <span>{detailError}</span>
+              <button
+                className="btn btn-ghost"
+                style={{ marginTop: 8 }}
+                onClick={() => void refreshDetail()}
+              >
+                Повторить
+              </button>
+            </div>
+          )}
           {detail && detail.channels.length === 0 && (
             <div className="empty-state">Нет каналов</div>
           )}
@@ -216,7 +240,9 @@ export function Sidebar({ open, onNavigate }: SidebarProps) {
                 showDot
                 online={online.has(d.peer.id)}
               />
-              <span className="grow">{d.peer.displayName}</span>
+              <span className="grow">
+                {d.peer.displayName.trim() || `@${d.peer.username}`}
+              </span>
               {!!d.channel.unread && d.channel.unread > 0 && (
                 <span className="badge">{d.channel.unread}</span>
               )}

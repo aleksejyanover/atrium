@@ -2486,7 +2486,286 @@ async function main() {
     assert(elapsed >= 5000, `answered too fast (${elapsed}ms) — must wait ~6s for the callee`)
     assert(elapsed <= 8000, `waited too long (${elapsed}ms) — ~6–7s expected`)
   })
+
+  // ============================================================
+  // SPEC v9 §38 — бот-модератор каналов (без договора, автоудаление, оценка)
+  // ============================================================
+
+  const mod20 = await check('§38: register rank-20 member (invited to the org)', async () => {
+    const data = await reg('mod20', 'Ранг Двадцать')
+    const inv = await api('POST', `/api/orgs/${orgId}/invite`, {
+      token: u1.token, body: { usernameOrEmail: `mod20_${RUN_ID}`, role: 'member' },
+    })
+    assert(inv.status === 201, `invite status ${inv.status}: ${JSON.stringify(inv.data)}`)
+    const acc = await api('POST', `/api/invites/${inv.data.invite.id}/accept`, {
+      token: data.token, body: { signatureDataUrl: FAKE_PNG, signedName: 'Ранг Двадцать' },
+    })
+    assert(acc.status === 200, `accept status ${acc.status}: ${JSON.stringify(acc.data)}`)
+    return data
+  })
+
+  const modChan = await check('§38: create a dedicated moderation channel', async () => {
+    const invitesBefore = await api('GET', `/api/orgs/${orgId}/invites`, { token: u1.token })
+    modTestState.invitesBefore = invitesBefore.data.invites.length
+    const { status, data } = await api('POST', `/api/orgs/${orgId}/channels`, {
+      token: u1.token, body: { name: `mod-${RUN_ID}` },
+    })
+    assert(status === 201, `channel create status ${status}: ${JSON.stringify(data)}`)
+    assert(data.channel?.id, `no channel id: ${JSON.stringify(data)}`)
+    return data.channel
+  })
+
+  await check('§38: add bot -> joins instantly, NO invite/contract, botInChannel flag, repeat -> already', async () => {
+    const add = await api('POST', `/api/orgs/${orgId}/channels/${modChan.id}/bot`, { token: u1.token })
+    assert(add.status === 200, `add status ${add.status}: ${JSON.stringify(add.data)}`)
+    assert(add.data.ok === true && add.data.already === false, `add payload: ${JSON.stringify(add.data)}`)
+
+    const st = await api('GET', `/api/orgs/${orgId}/channels/${modChan.id}/bot`, { token: u1.token })
+    assert(st.status === 200 && st.data.inChannel === true, `status: ${JSON.stringify(st.data)}`)
+
+    // каналы отдают флаг botInChannel (веб читает его без лишнего запроса)
+    const chans = await api('GET', `/api/orgs/${orgId}/channels`, { token: u1.token })
+    const row = (chans.data.channels || []).find((c) => c.id === modChan.id)
+    assert(row && row.botInChannel === true, `botInChannel missing: ${JSON.stringify(row)}`)
+
+    // бот НЕ стал участником организации и не создал приглашений/договоров
+    const org = await api('GET', `/api/orgs/${orgId}`, { token: u1.token })
+    assert(!(org.data.members || []).some((m) => m.username === 'atrium_bot'),
+      'bot must NOT be an org member (no contract flow)')
+    const invitesAfter = await api('GET', `/api/orgs/${orgId}/invites`, { token: u1.token })
+    assert(invitesAfter.data.invites.length === modTestState.invitesBefore,
+      'invites count changed after adding the bot')
+
+    const again = await api('POST', `/api/orgs/${orgId}/channels/${modChan.id}/bot`, { token: u1.token })
+    assert(again.status === 200 && again.data.already === true, `repeat: ${JSON.stringify(again.data)}`)
+  })
+
+  await check('§38: rank-20 member cannot add the bot -> 403', async () => {
+    const res = await api('POST', `/api/orgs/${orgId}/channels/${modChan.id}/bot`, { token: mod20.token })
+    assert(res.status === 403, `status ${res.status}: ${JSON.stringify(res.data)}`)
+  })
+
+  await check('§38: clean messages stay, channel_mod.messages grows', async () => {
+    for (let i = 0; i < 7; i++) {
+      const res = await ack(s1, 'message:send', { channelId: modChan.id, text: `mod-clean-${i}` })
+      assert(res.ok === true && res.message?.id, `clean send #${i}: ${JSON.stringify(res)}`)
+    }
+    const list = await api('GET', `/api/channels/${modChan.id}/messages?limit=100`, { token: u1.token })
+    const texts = list.data.messages.map((m) => m.text)
+    assert(texts.filter((t) => t.startsWith('mod-clean-')).length === 7,
+      `clean messages missing: ${texts.length}`)
+  })
+
+  await check('§38: profanity -> broadcast then deleted live + bot notice + ack {moderated:true}', async () => {
+    const delP = waitFor(s1, 'message:deleted', (p) => p?.channelId === modChan.id, 5000)
+    const res = await ack(s1, 'message:send', { channelId: modChan.id, text: 'тут будет пиздец и мат' })
+    assert(res.ok === true, `ack: ${JSON.stringify(res)}`)
+    assert(res.moderated === true, `moderated flag missing: ${JSON.stringify(res)}`)
+    assert(!res.message, 'moderated ack must not carry the message back')
+
+    const del = await delP
+    assert(typeof del.messageId === 'string' && del.messageId, `deleted payload: ${JSON.stringify(del)}`)
+
+    const list = await api('GET', `/api/channels/${modChan.id}/messages?limit=100`, { token: u1.token })
+    const texts = list.data.messages.map((m) => m.text)
+    assert(!texts.some((t) => t.includes('пиздец')), 'profane message still in the channel')
+    assert(texts.some((t) => t.includes('Сообщение удалено модератором')), 'bot notice missing')
+    assert(texts.filter((t) => t.startsWith('mod-clean-')).length === 7, 'clean messages were touched')
+  })
+
+  await check('§38: author gets the bot-DM warning «⚠️ Ваше сообщение …»', async () => {
+    const dmsRes = await api('GET', '/api/dms', { token: u1.token })
+    assert(dmsRes.status === 200, `dms status ${dmsRes.status}`)
+    const dm = dmsRes.data.dms.find((d) => d.peer?.username === 'atrium_bot')
+    assert(dm, 'bot DM not listed for the author')
+    const msgs = await api('GET', `/api/channels/${dm.channel.id}/messages?limit=50`, { token: u1.token })
+    const warns = msgs.data.messages.filter((m) => m.text.includes('⚠️ Ваше сообщение'))
+    assert(warns.length >= 1, 'no author warning in the bot DM')
+    assert(warns[warns.length - 1].text.includes(`#mod-${RUN_ID}`),
+      `warning must name the channel: ${warns[warns.length - 1].text}`)
+  })
+
+  await check('§38: rating -> bot posts score 92/100 (1 violation,8 messages)', async () => {
+    const res = await api('POST', `/api/orgs/${orgId}/channels/${modChan.id}/moderation/rating`, { token: u1.token })
+    assert(res.status === 200, `rating status ${res.status}: ${JSON.stringify(res.data)}`)
+    const list = await api('GET', `/api/channels/${modChan.id}/messages?limit=100`, { token: u1.token })
+    const rating = list.data.messages.filter((m) => m.text.includes('Оценка переписки'))
+    assert(rating.length >= 1, 'no rating message posted')
+    assert(rating[rating.length - 1].text.includes('92/100'), `score wrong: ${rating[rating.length - 1].text}`)
+    assert(rating[rating.length - 1].text.includes('сообщений: 8'), `messages count wrong: ${rating[rating.length - 1].text}`)
+    assert(rating[rating.length - 1].text.includes('нарушений: 1'), `violations wrong: ${rating[rating.length - 1].text}`)
+  })
+
+  await check('§38: rank-20 rating -> 403', async () => {
+    const res = await api('POST', `/api/orgs/${orgId}/channels/${modChan.id}/moderation/rating`, { token: mod20.token })
+    assert(res.status === 403, `status ${res.status}: ${JSON.stringify(res.data)}`)
+  })
+
+  await check('§38: remove the bot -> profanity is NOT deleted anymore', async () => {
+    const del = await api('DELETE', `/api/orgs/${orgId}/channels/${modChan.id}/bot`, { token: u1.token })
+    assert(del.status === 200 && del.data.ok === true, `remove: ${del.status} ${JSON.stringify(del.data)}`)
+    const st = await api('GET', `/api/orgs/${orgId}/channels/${modChan.id}/bot`, { token: u1.token })
+    assert(st.data.inChannel === false, `status after remove: ${JSON.stringify(st.data)}`)
+
+    const res = await ack(s1, 'message:send', { channelId: modChan.id, text: 'пиздец без бота остаётся' })
+    assert(res.ok === true && res.message?.id && !res.moderated,
+      `must not moderate without the bot: ${JSON.stringify(res)}`)
+    const list = await api('GET', `/api/channels/${modChan.id}/messages?limit=100`, { token: u1.token })
+    assert(list.data.messages.some((m) => m.text.includes('без бота остаётся')), 'message must stay')
+  })
+
+  await check('§38: audit row moderation.delete exists (action + no message text)', async () => {
+    const a = await api('GET', '/api/admin/audit?action=moderation.delete&limit=10', { token: adm.token })
+    assert(a.status === 200, `status ${a.status}`)
+    assert(a.data.items.length >= 1, 'no moderation.delete rows in the audit journal')
+    assert(a.data.items.every((i) => !(i.details || '').includes('пиздец')),
+      'audit details must not quote the profane text')
+  })
+
+  // ============================================================
+  // SPEC v9 §42 — банковский счёт: вывод на карту и пополнение с неё
+  // ============================================================
+
+  await check('§42: GET /wallet/bank (fresh) -> account null, ops empty', async () => {
+    const res = await api('GET', '/api/wallet/bank', { token: own.token })
+    assert(res.status === 200, `status ${res.status}`)
+    assert(res.data.account === null, `account: ${JSON.stringify(res.data.account)}`)
+    assert(Array.isArray(res.data.ops) && res.data.ops.length === 0, `ops: ${JSON.stringify(res.data.ops)}`)
+  })
+
+  const bkAccount = await check('§42: link a bank account (16 digits) -> masked, last4', async () => {
+    const bad = await api('POST', '/api/wallet/bank/account', {
+      token: own.token, body: { number: '123', holder: 'Иван', bank: 'Т-Банк' },
+    })
+    assert(bad.status === 400, `short number status ${bad.status}`)
+    const badHolder = await api('POST', '/api/wallet/bank/account', {
+      token: own.token, body: { number: '4242 4242 4242 4242', holder: '  ', bank: 'Т-Банк' },
+    })
+    assert(badHolder.status === 400, `blank holder status ${badHolder.status}`)
+
+    const res = await api('POST', '/api/wallet/bank/account', {
+      token: own.token, body: { number: '4242 4242 4242 7777', holder: 'Иванов Иван', bank: 'Т-Банк' },
+    })
+    assert(res.status === 200, `status ${res.status}: ${JSON.stringify(res.data)}`)
+    assert(res.data.account?.last4 === '7777', `last4: ${JSON.stringify(res.data.account)}`)
+    assert(res.data.account?.numberMasked === '•••• 7777', `masked: ${res.data.account.numberMasked}`)
+    assert(res.data.account?.holder === 'Иванов Иван', `holder: ${res.data.account.holder}`)
+    assert(!(JSON.stringify(res.data.account)).includes('4242 4242 4242 7777'), 'full number leaked')
+    return res.data.account
+  })
+
+  await check('§42: relink replaces the previous account', async () => {
+    const res = await api('POST', '/api/wallet/bank/account', {
+      token: own.token, body: { number: '5555555555551234', holder: 'Иванов Иван', bank: 'Сбер' },
+    })
+    assert(res.status === 200 && res.data.account?.last4 === '1234', `relink: ${JSON.stringify(res.data)}`)
+    assert(res.data.account?.bank === 'Сбер', `bank: ${res.data.account?.bank}`)
+  })
+
+  await check('§42: owner withdraw without pin -> 400 «Неверный пароль карты», no op', async () => {
+    const noPin = await api('POST', '/api/wallet/bank/withdraw', { token: own.token, body: { amount: 150 } })
+    assert(noPin.status === 400, `no-pin status ${noPin.status}`)
+    assert(noPin.data?.error === 'Неверный пароль карты', `error: ${noPin.data?.error}`)
+    const wrong = await api('POST', '/api/wallet/bank/withdraw', {
+      token: own.token, body: { amount: 150, pin: 'xxxx' },
+    })
+    assert(wrong.status === 400, `wrong-pin status ${wrong.status}`)
+    const ops = await api('GET', '/api/wallet/bank', { token: own.token })
+    assert(ops.data.ops.length === 0, 'failed withdraws must not create ops')
+  })
+
+  await check('§42: owner withdraw with pin -> 200, op completed, balance NOT decremented (§32)', async () => {
+    const before = await api('GET', '/api/wallet', { token: own.token })
+    const card = await myCard(own.token)
+    const res = await api('POST', '/api/wallet/bank/withdraw', {
+      token: own.token, body: { amount: 150, pin: card.pin },
+    })
+    assert(res.status === 200, `status ${res.status}: ${JSON.stringify(res.data)}`)
+    assert(res.data.op?.type === 'withdraw', `type: ${res.data.op?.type}`)
+    assert(res.data.op?.status === 'completed', `status: ${res.data.op?.status}`)
+    assert(res.data.op?.amount === 150, `amount: ${res.data.op?.amount}`)
+    assert(res.data.op?.accountLast4 === '1234', `last4: ${res.data.op?.accountLast4}`)
+    const after = await api('GET', '/api/wallet', { token: own.token })
+    assert(after.data.balance === before.data.balance,
+      `owner balance changed: ${before.data.balance} -> ${after.data.balance}`)
+  })
+
+  await check('§42: bank ops visible in GET /wallet/bank and merged into the wallet history', async () => {
+    const bank = await api('GET', '/api/wallet/bank', { token: own.token })
+    assert(bank.data.ops.length === 1, `ops: ${bank.data.ops.length}`)
+    assert(bank.data.ops[0].type === 'withdraw', 'first op must be the withdraw')
+    const hist = await api('GET', '/api/wallet', { token: own.token })
+    const row = hist.data.payments.find((p) => p.kind === 'bank_withdraw')
+    assert(row, `bank op missing in history: ${hist.data.payments.map((p) => p.kind).join(',')}`)
+    assert(row.direction === 'out' && row.amount === 150, `history row: ${JSON.stringify(row)}`)
+  })
+
+  await check('§42: owner bank topup (no pin) -> balance grows, op recorded', async () => {
+    const before = await api('GET', '/api/wallet', { token: own.token })
+    const res = await api('POST', '/api/wallet/bank/topup', { token: own.token, body: { amount: 250 } })
+    assert(res.status === 200, `status ${res.status}: ${JSON.stringify(res.data)}`)
+    assert(res.data.op?.type === 'topup', `type: ${res.data.op?.type}`)
+    const after = await api('GET', '/api/wallet', { token: own.token })
+    assert(after.data.balance === before.data.balance + 250,
+      `balance: ${before.data.balance} -> ${after.data.balance}`)
+  })
+
+  await check('§42: amount validation -> 400 (0, negative-ish, over limit)', async () => {
+    const zero = await api('POST', '/api/wallet/bank/topup', { token: own.token, body: { amount: 0 } })
+    assert(zero.status === 400, `topup0: ${zero.status}`)
+    const over = await api('POST', '/api/wallet/bank/topup', { token: own.token, body: { amount: 5000001 } })
+    assert(over.status === 400, `topup over limit: ${over.status}`)
+    const wZero = await api('POST', '/api/wallet/bank/withdraw', {
+      token: own.token, body: { amount: 0, pin: (await myCard(own.token)).pin },
+    })
+    assert(wZero.status === 400, `withdraw0: ${wZero.status}`)
+    const nan = await api('POST', '/api/wallet/bank/withdraw', {
+      token: own.token, body: { amount: 'abc', pin: (await myCard(own.token)).pin },
+    })
+    assert(nan.status === 400, `withdraw non-numeric: ${nan.status}`)
+  })
+
+  await check('§42: non-owner without account -> 400 «Сначала привяжите…», then insufficient funds -> 409', async () => {
+    const noAcc = await api('POST', '/api/wallet/bank/topup', { token: mod20.token, body: { amount: 500 } })
+    assert(noAcc.status === 400 && noAcc.data?.error?.includes('привяжите'),
+      `no-account: ${noAcc.status} ${noAcc.data?.error}`)
+    const link = await api('POST', '/api/wallet/bank/account', {
+      token: mod20.token, body: { number: '1111222233334444', holder: 'Ранг', bank: 'ВТБ' },
+    })
+    assert(link.status === 200, `link: ${link.status}`)
+    const topup = await api('POST', '/api/wallet/bank/topup', { token: mod20.token, body: { amount: 300 } })
+    assert(topup.status === 200, `topup: ${topup.status}`)
+    const poor = await api('POST', '/api/wallet/bank/withdraw', { token: mod20.token, body: { amount: 700 } })
+    assert(poor.status === 409 && poor.data?.error === 'Недостаточно средств',
+      `insufficient: ${poor.status} ${poor.data?.error}`)
+    const ok = await api('POST', '/api/wallet/bank/withdraw', { token: mod20.token, body: { amount: 200 } })
+    assert(ok.status === 200 && ok.data.balance === 100, `withdraw: ${ok.status} ${JSON.stringify(ok.data)}`)
+  })
+
+  await check('§42: unlink -> account gone, ops preserved, withdraw blocked', async () => {
+    const del = await api('DELETE', '/api/wallet/bank/account', { token: own.token })
+    assert(del.status === 200 && del.data.ok === true, `unlink: ${del.status}`)
+    const after = await api('GET', '/api/wallet/bank', { token: own.token })
+    assert(after.data.account === null, 'account must be gone')
+    assert(after.data.ops.length >= 2, `ops must survive unlink: ${after.data.ops.length}`)
+    const card = await myCard(own.token)
+    const blocked = await api('POST', '/api/wallet/bank/withdraw', {
+      token: own.token, body: { amount: 10, pin: card.pin },
+    })
+    assert(blocked.status === 400 && blocked.data?.error?.includes('привяжите'),
+      `withdraw after unlink: ${blocked.status} ${blocked.data?.error}`)
+  })
+
+  await check('§42: audit rows bank.withdraw + bank.topup recorded', async () => {
+    const w = await api('GET', '/api/admin/audit?action=bank.withdraw&limit=5', { token: adm.token })
+    assert(w.status === 200 && w.data.items.length >= 1, 'no bank.withdraw audit rows')
+    const t = await api('GET', '/api/admin/audit?action=bank.topup&limit=5', { token: adm.token })
+    assert(t.status === 200 && t.data.items.length >= 1, 'no bank.topup audit rows')
+  })
 }
+
+// доп. состояние для §38 (счётчик приглашений до/после добавления бота)
+const modTestState = {}
 
 main()
   .then(() => {

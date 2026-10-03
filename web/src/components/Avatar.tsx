@@ -2,7 +2,8 @@ import type { User } from '../types';
 
 function initials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean);
-  if (parts.length === 0) return '?';
+  // Пустое имя (например, системный бот, SPEC v9 §37) — осознанная заглушка.
+  if (parts.length === 0) return '🤖';
   if (parts.length === 1) return parts[0].slice(0, 2);
   return (parts[0][0] ?? '') + (parts[1][0] ?? '');
 }
@@ -31,7 +32,8 @@ export function Avatar({ name, color, size = 'md', online, showDot, title }: Ava
       style={{
         width: px,
         height: px,
-        background: color,
+        // пустой цвет (бот может быть без avatarColor) — фирменный фолбэк
+        background: color || 'var(--accent-2)',
         fontSize: Math.max(9, Math.round(px * 0.36)),
       }}
       aria-hidden

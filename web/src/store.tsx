@@ -31,6 +31,29 @@ import type { ToastItem } from './components/Toasts';
 const LAST_ORG_KEY = 'atrium_last_org';
 const APP_TITLE = 'Atrium — корпоративный мессенджер';
 
+/**
+ * SPEC v9 §39: повтор загрузки при сетевых сбоях/5xx (обрыв туннеля, рестарт
+ * сервера при деплое). Клиентские ошибки (4xx) и401 не повторяются — они
+ * не «лечатся» ещё одной попыткой.
+ */
+async function withRetry<T>(
+  fn: () => Promise<T>,
+  delaysMs: number[] = [1000, 2000, 4000],
+): Promise<T> {
+  let lastErr: unknown = null;
+  for (let attempt = 0; attempt <= delaysMs.length; attempt++) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastErr = e;
+      const retriable = !(e instanceof ApiError) || e.status >= 500;
+      if (!retriable || attempt === delaysMs.length) throw e;
+      await new Promise((r) => window.setTimeout(r, delaysMs[attempt]));
+    }
+  }
+  throw lastErr;
+}
+
 export type View =
   | 'chat'
   | 'invites'
@@ -41,7 +64,7 @@ export type View =
   | 'wallet'
   | 'admin';
 
-export type PanelTab = 'members' | 'invites' | 'activity' | 'roles' | 'info' | 'finance';
+export type PanelTab = 'members' | 'invites' | 'activity' | 'roles' | 'info' | 'finance' | 'channel';
 
 /** Данные экрана «Вас забанили» (SPEC v7 §35, событие `user:banned`). */
 export interface BanNotice {
@@ -58,6 +81,10 @@ export interface AppStore {
   orgs: OrgWithRole[];
   currentOrgId: string | null;
   detail: OrgDetail | null;
+  /** SPEC v9 §39: идёт загрузка каналов организации. */
+  detailLoading: boolean;
+  /** SPEC v9 §39: ошибка последней загрузки (показывается при пустом detail). */
+  detailError: string | null;
   dms: DMEntry[];
   dmsLoaded: boolean;
   invites: IncomingInvite[];
@@ -127,6 +154,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     localStorage.getItem(LAST_ORG_KEY),
   );
   const [detail, setDetail] = useState<OrgDetail | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState<string | null>(null);
   const [dms, setDms] = useState<DMEntry[]>([]);
   const [dmsLoaded, setDmsLoaded] = useState(false);
   const [invites, setInvites] = useState<IncomingInvite[]>([]);
@@ -172,7 +201,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const refreshOrgs = useCallback(async () => {
     try {
-      const list = await api.listOrgs();
+      // SPEC v9 §39: один повтор через2с при сетевом сбое
+      const list = await withRetry(() => api.listOrgs(), [2000]);
       setOrgs(list);
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) return;
@@ -184,22 +214,39 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const id = currentOrgIdRef.current;
     if (!id) {
       setDetail(null);
+      setDetailLoading(false);
+      setDetailError(null);
       return;
     }
     const seq = ++detailSeq.current;
+    setDetailLoading(true);
     try {
-      const d = await api.getOrg(id);
-      if (seq === detailSeq.current) setDetail(d);
+      // SPEC v9 §39: backoff1с/2с/4с — сбой первого запроса больше не
+      // оставляет пустой список каналов навсегда
+      const d = await withRetry(() => api.getOrg(id));
+      if (seq === detailSeq.current) {
+        setDetail(d);
+        setDetailError(null);
+      }
     } catch (e) {
       if (e instanceof ApiError && (e.status === 403 || e.status === 404)) {
         // org no longer accessible → reload the list and re-pick
-        if (seq === detailSeq.current) setDetail(null);
+        if (seq === detailSeq.current) {
+          setDetail(null);
+          setDetailError(null);
+        }
         await refreshOrgs();
         return;
       }
       if (!(e instanceof ApiError && e.status === 401)) {
-        toast(e instanceof Error ? e.message : 'Не удалось загрузить организацию', 'error');
+        const msg = e instanceof Error ? e.message : 'Не удалось загрузить организацию';
+        // старый detail НЕ затираем; флаг учитывается в Sidebar только при
+        // detail === null (там его и показываем)
+        if (seq === detailSeq.current) setDetailError(msg);
+        toast(msg, 'error');
       }
+    } finally {
+      if (seq === detailSeq.current) setDetailLoading(false);
     }
   }, [refreshOrgs, toast]);
 
@@ -382,6 +429,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!currentOrgId) {
       setDetail(null);
+      setDetailError(null);
       return;
     }
     void refreshDetail();
@@ -428,6 +476,19 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!socket) return;
+
+    // SPEC v9 §39: реконнект сокета (обрыв туннеля) догоняет пропущенное —
+    // организации, каналы, ЛС; не чаще одного раза в10 секунд
+    let lastHealAt = Date.now();
+    const onConnect = () => {
+      const now = Date.now();
+      if (now - lastHealAt < 10000) return;
+      lastHealAt = now;
+      void refreshOrgs();
+      void refreshDetail();
+      void refreshDMs();
+    };
+    socket.on('connect', onConnect);
 
     const orgNameOf = (payload: unknown): string =>
       isRecord(payload) && isRecord(payload.org) && typeof payload.org.name === 'string'
@@ -637,6 +698,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     socket.on('wallet:updated', onWalletUpdated);
 
     return () => {
+      socket.off('connect', onConnect);
       socket.off('invite:new', onInviteNew);
       socket.off('member:joined', onMemberEvent);
       socket.off('member:left', onMemberEvent);
@@ -657,6 +719,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     bumpUnread,
     refreshApplications,
     refreshDetail,
+    refreshDMs,
     refreshInvites,
     refreshMyDocuments,
     refreshOrgs,
@@ -723,6 +786,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     orgs,
     currentOrgId,
     detail,
+    detailLoading,
+    detailError,
     dms,
     dmsLoaded,
     invites,

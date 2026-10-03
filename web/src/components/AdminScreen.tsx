@@ -87,6 +87,10 @@ const ACTION_LABELS: Record<string, string> = {
   'wallet.transfer': 'Перевод',
   'user.ban': 'Блокировка',
   'user.unban': 'Разблокировка',
+  'owner.claim': 'Активация карточки владельца',
+  'moderation.delete': 'Модерация: автоудаление сообщения',
+  'bank.withdraw': 'Вывод на банковскую карту',
+  'bank.topup': 'Пополнение с банковской карты',
 };
 
 function actionLabel(action: string): string {
@@ -669,6 +673,10 @@ const BOT_EVENT_LABELS: Record<string, string> = {
   'wallet.transfer': 'Переводы',
   'org.payroll': 'Выплаты зарплат',
   'user.ban': 'Блокировки',
+  'owner.claim': 'Активация карточки владельца',
+  'moderation.delete': 'Модерация переписки (автоудаление)',
+  'bank.withdraw': 'Вывод на банковскую карту',
+  'bank.topup': 'Пополнение с банковской карты',
 };
 
 const BOT_PREVIEW = [

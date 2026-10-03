@@ -2,6 +2,8 @@ import { apiFetch } from '@/lib/api';
 import {
   ActivityEntry,
   ApplicationItem,
+  BankAccount,
+  BankOp,
   Channel,
   ContractDocument,
   DMItem,
@@ -159,6 +161,55 @@ export const walletApi = {
     payment: PaymentRow;
   }> {
     return apiFetch('/api/wallet/transfer', { method: 'POST', body });
+  },
+
+  /* ---- банковский счёт (SPEC v9 §40) ---- */
+
+  /** Привязанный счёт + операции по нему. */
+  bank(): Promise<{ account: BankAccount | null; ops: BankOp[] }> {
+    return apiFetch('/api/wallet/bank');
+  },
+  /** Привязать/заменить счёт: номер не сохраняется — только маска и последние 4 цифры. */
+  linkBankAccount(body: {
+    number: string;
+    holder: string;
+    bank: string;
+  }): Promise<{ ok: true; account: BankAccount }> {
+    return apiFetch('/api/wallet/bank/account', { method: 'POST', body });
+  },
+  unlinkBankAccount(): Promise<{ ok: true }> {
+    return apiFetch('/api/wallet/bank/account', { method: 'DELETE' });
+  },
+  /** Вывод на привязанную карту; пароль карты обязателен для владельца (SPEC v6 §32). */
+  bankWithdraw(body: { amount: number; pin?: string }): Promise<{
+    ok: true;
+    op: BankOp;
+    balance: number;
+  }> {
+    return apiFetch('/api/wallet/bank/withdraw', { method: 'POST', body });
+  },
+  /** Пополнение счёта приложения с привязанной банковской карты (PIN не нужен). */
+  bankTopup(body: { amount: number }): Promise<{ ok: true; op: BankOp; balance: number }> {
+    return apiFetch('/api/wallet/bank/topup', { method: 'POST', body });
+  },
+};
+
+/** Бот-модератор канала (SPEC v9 §37): добавление без договора, оценка переписки. */
+export const moderationApi = {
+  addBot(orgId: string, channelId: string): Promise<{ ok: true; already: boolean }> {
+    return apiFetch(`/api/orgs/${orgId}/channels/${channelId}/bot`, { method: 'POST' });
+  },
+  removeBot(orgId: string, channelId: string): Promise<{ ok: true }> {
+    return apiFetch(`/api/orgs/${orgId}/channels/${channelId}/bot`, { method: 'DELETE' });
+  },
+  botStatus(orgId: string, channelId: string): Promise<{ inChannel: boolean }> {
+    return apiFetch(`/api/orgs/${orgId}/channels/${channelId}/bot`);
+  },
+  /** Бот публикует «📊 Оценка переписки: …» в канал. */
+  requestRating(orgId: string, channelId: string): Promise<{ ok: true }> {
+    return apiFetch(`/api/orgs/${orgId}/channels/${channelId}/moderation/rating`, {
+      method: 'POST',
+    });
   },
 };
 

@@ -33,10 +33,21 @@ export const BOT_EVENTS = [
   'org.payroll',
   'user.ban',
   'owner.claim',
+  // SPEC v9: авто-модерация каналов + банковские операции
+  'moderation.delete',
+  'bank.withdraw',
+  'bank.topup',
 ]
 
-/** Pre-SPEC v5 default (no owner.claim) — lazily upgraded in getBotSettings(). */
-const LEGACY_DEFAULT_EVENTS = BOT_EVENTS.filter((e) => e !== 'owner.claim')
+/**
+ * Exact previous defaults — a saved settings object equal to any of them is
+ * replaced with the current catalog (explicit user edits are kept untouched).
+ * v4 default: no owner.claim, no v9 events. v5–v8 default: no v9 events.
+ */
+const PREVIOUS_DEFAULTS = [
+  BOT_EVENTS.filter((e) => e !== 'owner.claim' && !e.startsWith('moderation.') && !e.startsWith('bank.')),
+  BOT_EVENTS.filter((e) => !e.startsWith('moderation.') && !e.startsWith('bank.')),
+]
 
 const EMOJI = {
   'auth.login': '🔴',
@@ -64,6 +75,9 @@ const EMOJI = {
   'user.ban': '⛔',
   'user.unban': '♻️',
   'owner.claim': '👑',
+  'moderation.delete': '🤖',
+  'bank.withdraw': '🏦',
+  'bank.topup': '💳',
 }
 
 /** Short labels for 60s dedupe summaries («Вход: alex ×3 за минуту»). */
@@ -93,6 +107,9 @@ const SUMMARY_LABEL = {
   'user.ban': 'Блокировка',
   'user.unban': 'Разблокировка',
   'owner.claim': 'Карточка владельца',
+  'moderation.delete': 'Модерация: автоудаление',
+  'bank.withdraw': 'Вывод на банковскую карту',
+  'bank.topup': 'Пополнение с банковской карты',
 }
 
 // ---- settings (admin_settings key 'bot') ----
@@ -106,12 +123,12 @@ export function getBotSettings() {
       ? parsed.events.filter((e) => typeof e === 'string' && e)
       : [...BOT_EVENTS]
     if (!events.length) events = [...BOT_EVENTS]
-    // SPEC v5 §29: settings saved before `owner.claim` existed are upgraded to the
-    // current default (only an exact legacy default — explicit user edits are kept).
-    const isLegacyDefault =
-      events.length === LEGACY_DEFAULT_EVENTS.length &&
-      LEGACY_DEFAULT_EVENTS.every((e) => events.includes(e))
-    if (isLegacyDefault) events = [...BOT_EVENTS]
+    // SPEC v5 §29/v9: settings saved with an exact previous default are
+    // upgraded to the current catalog (explicit user edits are kept).
+    const isPreviousDefault = PREVIOUS_DEFAULTS.some(
+      (def) => events.length === def.length && def.every((e) => events.includes(e))
+    )
+    if (isPreviousDefault) events = [...BOT_EVENTS]
     return { enabled: parsed.enabled !== false, events }
   } catch {
     return { enabled: true, events: [...BOT_EVENTS] }

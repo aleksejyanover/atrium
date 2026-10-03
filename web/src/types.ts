@@ -107,6 +107,12 @@ export interface Channel {
   createdAt: number;
   /** Непрочитанные сообщения (SPEC v3 §18). */
   unread?: number;
+  /**
+   * Состоит ли бот-модератор в канале (SPEC v9 §37.2). Сервер может отдавать
+   * это поле в списках каналов — тогда оно служит начальным значением статуса
+   * и экономит запрос `GET …/bot`.
+   */
+  botInChannel?: boolean;
 }
 
 export interface DMEntry {
@@ -275,7 +281,13 @@ export interface ReadEntry {
 
 /* ---------------- wallet & org finance (SPEC v4 §24) ---------------- */
 
-export type PaymentKind = 'topup' | 'transfer' | 'salary' | 'treasury_deposit';
+export type PaymentKind =
+  | 'topup'
+  | 'transfer'
+  | 'salary'
+  | 'treasury_deposit'
+  | 'bank_withdraw'
+  | 'bank_topup';
 
 /** An entry of `GET /api/wallet` history (as seen by the caller). */
 export interface WalletPayment {
@@ -320,7 +332,32 @@ export function paymentKindLabel(kind: PaymentKind): string {
       return 'Зарплата';
     case 'treasury_deposit':
       return 'Казначейство';
+    case 'bank_withdraw':
+      return 'Вывод на карту';
+    case 'bank_topup':
+      return 'Пополнение с карты';
   }
+}
+
+/* ---------------- банковский счёт (SPEC v9 §40) ---------------- */
+
+export interface BankAccount {
+  id: string;
+  holder: string;
+  numberMasked: string;
+  last4: string;
+  bank: string;
+  createdAt: number;
+}
+
+export interface BankOp {
+  id: string;
+  type: 'withdraw' | 'topup';
+  amount: number;
+  status: string;
+  accountLast4: string;
+  bank: string;
+  createdAt: number;
 }
 
 /* ---------------- creator panel (SPEC v4 §23) ---------------- */

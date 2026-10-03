@@ -8,6 +8,7 @@ import {
   canEditOrg,
   canInvite,
   canLeaveOrg,
+  canManageChannelModeration,
   canViewOrgInvites,
   canViewStaffDocs,
   assignableRoles,
@@ -22,6 +23,7 @@ import {
   roleRank,
   unwrapUser,
   type ActivityEntry,
+  type Channel,
   type OrgDismissal,
   type OrgFinance,
   type OrgFinanceTx,
@@ -38,6 +40,7 @@ import {
   ArrowDownLeftIcon,
   ArrowUpRightIcon,
   DoorOpenIcon,
+  HashIcon,
   HistoryIcon,
   InfoIcon,
   MailIcon,
@@ -764,6 +767,134 @@ function FinanceTab({ rank }: { rank: number }) {
 }
 
 /* ============================================================
+   Бот-модератор канала (SPEC v9 §37)
+   ============================================================ */
+
+function ChannelModerationCard({ channel, rank }: { channel: Channel; rank: number }) {
+  const { currentOrgId, toast, refreshDetail } = useApp();
+  const canManage = canManageChannelModeration(rank);
+
+  const [inChannel, setInChannel] = useState<boolean | null>(
+    typeof channel.botInChannel === 'boolean' ? channel.botInChannel : null,
+  );
+  const [statusError, setStatusError] = useState(false);
+  const [botBusy, setBotBusy] = useState(false);
+  const [ratingBusy, setRatingBusy] = useState(false);
+
+  // Статус бота: если сервер отдаёт `botInChannel` в списке каналов — берём его
+  // как начальное значение без лишнего запроса, иначе спрашиваем `GET …/bot`.
+  useEffect(() => {
+    setStatusError(false);
+    if (typeof channel.botInChannel === 'boolean') {
+      setInChannel(channel.botInChannel);
+      return;
+    }
+    setInChannel(null);
+    if (!currentOrgId) return;
+    let cancelled = false;
+    api
+      .channelBotStatus(currentOrgId, channel.id)
+      .then((v) => {
+        if (!cancelled) setInChannel(v);
+      })
+      .catch(() => {
+        if (!cancelled) setStatusError(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentOrgId, channel.id, channel.botInChannel]);
+
+  const toggleBot = async () => {
+    if (!currentOrgId || botBusy || inChannel === null) return;
+    setBotBusy(true);
+    try {
+      if (inChannel) {
+        await api.removeChannelBot(currentOrgId, channel.id);
+        setInChannel(false);
+        toast('Бот-модератор убран из канала', 'success');
+      } else {
+        const res = await api.addChannelBot(currentOrgId, channel.id);
+        setInChannel(true);
+        toast(
+          res.already ? 'Бот-модератор уже в канале' : 'Бот-модератор добавлен в канал',
+          'success',
+        );
+      }
+      // Если сервер отдаёт бота в списках — синхронизируем кэш каналов.
+      if (channel.botInChannel !== undefined) void refreshDetail();
+    } catch (e) {
+      toast(e instanceof Error ? e.message : 'Не удалось изменить статус бота', 'error');
+    } finally {
+      setBotBusy(false);
+    }
+  };
+
+  const requestRating = async () => {
+    if (!currentOrgId || ratingBusy) return;
+    setRatingBusy(true);
+    try {
+      await api.channelModerationRating(currentOrgId, channel.id);
+      toast('Бот публикует оценку в канал', 'success');
+    } catch (e) {
+      toast(e instanceof Error ? e.message : 'Не удалось запросить оценку переписки', 'error');
+    } finally {
+      setRatingBusy(false);
+    }
+  };
+
+  const statusLabel =
+    inChannel === null
+      ? statusError
+        ? 'Недоступно'
+        : 'Загрузка…'
+      : inChannel
+        ? 'В канале'
+        : 'Не добавлен';
+  const badgeClass = inChannel === true ? 'status-badge approved' : 'status-badge';
+  const rightsTitle = canManage ? undefined : 'Недостаточно прав';
+
+  return (
+    <div className="info-card">
+      <div className="bot-status-row">
+        <span className="panel-section-title" style={{ margin: 0 }}>
+          Бот-модератор
+        </span>
+        <span className={badgeClass}>{statusLabel}</span>
+      </div>
+      <div className="hint">Следит за перепиской и удаляет нецензурные сообщения</div>
+      <div className="bot-actions">
+        <button
+          className="btn btn-primary btn-sm"
+          disabled={!canManage || botBusy || inChannel === null}
+          title={rightsTitle}
+          onClick={() => void toggleBot()}
+        >
+          {botBusy
+            ? 'Сохранение…'
+            : inChannel
+              ? '🤖 Бот-модератор: убрать'
+              : '🤖 Бот-модератор: добавить'}
+        </button>
+        <button
+          className="btn btn-ghost btn-sm"
+          disabled={!canManage || ratingBusy}
+          title={rightsTitle}
+          onClick={() => void requestRating()}
+        >
+          {ratingBusy ? 'Запрос…' : '📊 Оценка переписки'}
+        </button>
+      </div>
+      {!canManage && (
+        <div className="hint" style={{ marginTop: 8 }}>
+          Недостаточно прав — управление ботом доступно администраторам канала
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ============================================================
    Right panel
    ============================================================ */
 
@@ -788,6 +919,7 @@ export function RightPanel() {
     socket,
     detail,
     currentOrgId,
+    selectedChannelId,
     panelTab,
     setPanelTab,
     closePanel,
@@ -918,10 +1050,26 @@ export function RightPanel() {
     };
   }, [socket, panelTab, currentOrgId]);
 
+  /* ---- канал, к которому относится панель (SPEC v9 §37.3) ---- */
+
+  const activeChannel =
+    detail && selectedChannelId
+      ? detail.channels.find((c) => c.id === selectedChannelId) ?? null
+      : null;
+
+  // Вкладка «Канал» существует только для обычных каналов (не для ЛС).
+  useEffect(() => {
+    if (detail && panelTab === 'channel' && !activeChannel) setPanelTab('members');
+  }, [detail, panelTab, activeChannel, setPanelTab]);
+
   if (!detail) return null;
 
   const tabs: Array<{ id: PanelTab; label: string; icon: ReactNode }> = [
     { id: 'members', label: 'Участники', icon: <UsersIcon size={13} /> },
+    // вкладка канала — только когда открыт обычный канал, не ЛС (SPEC v9 §37.3)
+    ...(activeChannel
+      ? [{ id: 'channel' as PanelTab, label: 'Канал', icon: <HashIcon size={13} /> }]
+      : []),
     ...(canViewOrgInvites(rank)
       ? [{ id: 'invites' as PanelTab, label: 'Приглашения', icon: <MailIcon size={13} /> }]
       : []),
@@ -1316,6 +1464,35 @@ export function RightPanel() {
     </>
   );
 
+  /* ---------------- tabs: channel (SPEC v9 §37) ---------------- */
+
+  const renderChannel = () => {
+    if (!activeChannel) return <div className="empty-state">Канал не выбран</div>;
+    return (
+      <>
+        <p className="panel-section-title">О канале</p>
+        <div className="info-card">
+          <div style={{ fontWeight: 700, fontSize: 15, marginBottom: 6 }}>
+            #{activeChannel.name ?? 'канал'}
+          </div>
+          <div className="info-kv">
+            <span className="k">Участников</span>
+            <span className="v">{detail.members.length}</span>
+          </div>
+          <div className="info-kv">
+            <span className="k">Создан</span>
+            <span className="v">{dateFmt.format(activeChannel.createdAt)}</span>
+          </div>
+        </div>
+
+        <p className="panel-section-title" style={{ marginTop: 16 }}>
+          Модерация переписки
+        </p>
+        <ChannelModerationCard channel={activeChannel} rank={rank} />
+      </>
+    );
+  };
+
   return (
     <aside className="right-panel">
       <div className="panel-head">
@@ -1341,6 +1518,7 @@ export function RightPanel() {
         {panelTab === 'finance' && <FinanceTab rank={rank} />}
         {panelTab === 'roles' && renderRoles()}
         {panelTab === 'info' && renderInfo()}
+        {panelTab === 'channel' && renderChannel()}
       </div>
 
       {canLeaveOrg(actor) && (

@@ -66,6 +66,49 @@ function walletPaymentDto(row, meId) {
 
 const nameOf = (id) => (id ? findUserById(id)?.display_name || 'Пользователь' : 'Пользователь')
 
+// ---------- SPEC v9 §40: банковский счёт ----------
+
+/** bank_ops row → тот же DTO-формат, что и payments (общая история). */
+function bankPaymentDto(row) {
+  return {
+    id: row.id,
+    kind: row.type === 'withdraw' ? 'bank_withdraw' : 'bank_topup',
+    amount: row.amount,
+    direction: row.type === 'withdraw' ? 'out' : 'in',
+    counterparty: null,
+    note: row.bank ? `Банк ${row.bank}` : null,
+    cardMask: `•••• ${row.account_last4}`,
+    createdAt: row.created_at,
+  }
+}
+
+/** bank_ops row → DTO для GET /api/wallet/bank. */
+function bankOpDto(row) {
+  return {
+    id: row.id,
+    type: row.type,
+    amount: row.amount,
+    status: row.status,
+    accountLast4: row.account_last4,
+    bank: row.bank,
+    createdAt: row.created_at,
+  }
+}
+
+const findBankAccount = (userId) => get('SELECT * FROM bank_accounts WHERE user_id = ?', userId)
+
+function bankAccountDto(row) {
+  if (!row) return null
+  return {
+    id: row.id,
+    holder: row.holder,
+    numberMasked: row.number_masked,
+    last4: row.last4,
+    bank: row.bank,
+    createdAt: row.created_at,
+  }
+}
+
 // ---------- personal wallet (SPEC v4 §24) ----------
 
 // GET /api/wallet -> {balance, demo:true, payments:[...]} — 30 latest operations
@@ -79,11 +122,23 @@ router.get('/wallet', requireAuth, (req, res, next) => {
       req.userId,
       req.userId
     )
+    // SPEC v9 §40: банковские операции видны в общей истории кошелька
+    const bankRows = all(
+      `SELECT * FROM bank_ops WHERE user_id = ?
+       ORDER BY created_at DESC, rowid DESC LIMIT 30`,
+      req.userId
+    )
     const user = findUserById(req.userId)
+    const payments = [
+      ...rows.map((r) => walletPaymentDto(r, req.userId)),
+      ...bankRows.map(bankPaymentDto),
+    ]
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .slice(0, 30)
     res.json({
       balance: user.balance ?? 0,
       demo: true,
-      payments: rows.map((r) => walletPaymentDto(r, req.userId)),
+      payments,
     })
   } catch (err) {
     next(err)
@@ -368,6 +423,167 @@ router.post('/orgs/:id/payroll', requireAuth, requireOrgMember, requireRank(60, 
       amount,
     })
     res.json({ orgBalance: result.orgBalance, payment: paymentRow(result.payment) })
+  } catch (err) {
+    next(err)
+  }
+})
+
+// ---------- SPEC v9 §40: вывод на банковскую карту и пополнение с неё ----------
+
+// GET /api/wallet/bank -> {account, ops:[...]}
+router.get('/wallet/bank', requireAuth, (req, res, next) => {
+  try {
+    const account = findBankAccount(req.userId)
+    const ops = all(
+      'SELECT * FROM bank_ops WHERE user_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 50',
+      req.userId
+    )
+    res.json({ account: bankAccountDto(account), ops: ops.map(bankOpDto) })
+  } catch (err) {
+    next(err)
+  }
+})
+
+// POST /api/wallet/bank/account {number, holder, bank} -> {ok, account}
+// Номер не сохраняется: только маска и последние4 цифры.
+router.post('/wallet/bank/account', requireAuth, (req, res, next) => {
+  try {
+    const body = req.body || {}
+    const number = String(body.number ?? '').replace(/[\s-]/g, '')
+    const isCard = /^\d{16}$/.test(number)
+    const isIban = /^[A-Za-z]{2}\d{2}[A-Za-z0-9]{18}$/.test(number) // ровно20 символов
+    if (!isCard && !isIban) throw bad('Номер карты:16 цифр или IBAN (20 символов)')
+    const holder = String(body.holder ?? '').trim()
+    if (!holder || holder.length > 100) throw bad('Имя держателя:1–100 символов')
+    const bank = String(body.bank ?? '').trim()
+    if (!bank || bank.length > 100) throw bad('Название банка:1–100 символов')
+
+    const last4 = number.slice(-4).toUpperCase()
+    const numberMasked = `•••• ${last4}`
+    const account = transaction(() => {
+      run('DELETE FROM bank_accounts WHERE user_id = ?', req.userId) // одна привязка на пользователя
+      const id = newId('bk')
+      run(
+        `INSERT INTO bank_accounts (id, user_id, holder, number_masked, last4, bank, created_at)
+         VALUES (?,?,?,?,?,?,?)`,
+        id,
+        req.userId,
+        holder,
+        numberMasked,
+        last4,
+        bank,
+        Date.now()
+      )
+      return get('SELECT * FROM bank_accounts WHERE id = ?', id)
+    })
+    res.json({ ok: true, account: bankAccountDto(account) })
+  } catch (err) {
+    next(err)
+  }
+})
+
+// DELETE /api/wallet/bank/account -> {ok:true} (операции в истории сохраняются)
+router.delete('/wallet/bank/account', requireAuth, (req, res, next) => {
+  try {
+    // §40.3: не даём отвязать счёт с незавершёнными операциями (страховка —
+    // все текущие op создаются как completed)
+    const pending = get(
+      "SELECT id FROM bank_ops WHERE user_id = ? AND status != 'completed' LIMIT 1",
+      req.userId
+    )
+    if (pending) throw conflict('Есть незавершённые операции по счёту')
+    run('DELETE FROM bank_accounts WHERE user_id = ?', req.userId)
+    res.json({ ok: true })
+  } catch (err) {
+    next(err)
+  }
+})
+
+// POST /api/wallet/bank/withdraw {amount, pin?} -> {ok, op, balance}
+// Исходящая операция: владелец подтверждает PIN (§32–33), его баланс не
+// уменьшается (семантика v5/v6); обычный пользователь — по реальному балансу.
+router.post('/wallet/bank/withdraw', requireAuth, (req, res, next) => {
+  try {
+    const body = req.body || {}
+    const me = findUserById(req.userId)
+    requireOwnerPin(me, body.pin) // владелец: PIN обязателен (иначе400 «Неверный пароль карты»)
+    const account = findBankAccount(req.userId)
+    if (!account) throw bad('Сначала привяжите банковский счёт')
+    const amount = amountOf(body.amount, 1, Number.MAX_SAFE_INTEGER, 'Сумма перевода: целое число от 1 ₽')
+
+    const result = transaction(() => {
+      const sender = findUserById(req.userId)
+      const infinite = !!sender.is_owner // §29/§32: владелец — средства не ограничены
+      if (!infinite && (sender.balance ?? 0) < amount) throw conflict('Недостаточно средств')
+      if (!infinite) run('UPDATE users SET balance = balance - ? WHERE id = ?', amount, req.userId)
+      const id = newId('bk')
+      run(
+        `INSERT INTO bank_ops (id, user_id, type, amount, status, account_last4, bank, created_at)
+         VALUES (?,?,? ,?,'completed',?,?,?)`,
+        id,
+        req.userId,
+        'withdraw',
+        amount,
+        account.last4,
+        account.bank,
+        Date.now()
+      )
+      const row = get('SELECT * FROM bank_ops WHERE id = ?', id)
+      const after = findUserById(req.userId)
+      return { op: row, balance: after.balance ?? 0 }
+    })
+
+    logAudit({
+      actorId: req.userId,
+      action: 'bank.withdraw',
+      details: `Вывод на банковскую карту •••• ${account.last4}: −${rub(amount)} ₽`,
+      botText: `🏦 Вывод на банковскую карту •••• ${account.last4}: −${rub(amount)} ₽`,
+      botSubject: req.userId,
+    })
+    emitToUser(req.userId, 'wallet:updated', { balance: result.balance, reason: 'bank_withdraw', amount })
+    res.json({ ok: true, op: bankOpDto(result.op), balance: result.balance })
+  } catch (err) {
+    next(err)
+  }
+})
+
+// POST /api/wallet/bank/topup {amount} -> {ok, op, balance}
+// Входящая операция: PIN не требуется (§40.5), сумма1–5 000 000 ₽.
+router.post('/wallet/bank/topup', requireAuth, (req, res, next) => {
+  try {
+    const body = req.body || {}
+    const account = findBankAccount(req.userId)
+    if (!account) throw bad('Сначала привяжите банковский счёт')
+    const amount = amountOf(body.amount, 1, 5000000, 'Сумма пополнения:1–5 000 000 ₽')
+
+    const result = transaction(() => {
+      run('UPDATE users SET balance = balance + ? WHERE id = ?', amount, req.userId)
+      const id = newId('bk')
+      run(
+        `INSERT INTO bank_ops (id, user_id, type, amount, status, account_last4, bank, created_at)
+         VALUES (?,?,? ,?,'completed',?,?,?)`,
+        id,
+        req.userId,
+        'topup',
+        amount,
+        account.last4,
+        account.bank,
+        Date.now()
+      )
+      const row = get('SELECT * FROM bank_ops WHERE id = ?', id)
+      const after = findUserById(req.userId)
+      return { op: row, balance: after.balance ?? 0 }
+    })
+
+    logAudit({
+      actorId: req.userId,
+      action: 'bank.topup',
+      details: `Пополнение с банковской карты •••• ${account.last4}: +${rub(amount)} ₽`,
+      botText: `💳 Пополнение с банковской карты •••• ${account.last4}: +${rub(amount)} ₽`,
+      botSubject: req.userId,
+    })
+    emitToUser(req.userId, 'wallet:updated', { balance: result.balance, reason: 'bank_topup', amount })
+    res.json({ ok: true, op: bankOpDto(result.op), balance: result.balance })
   } catch (err) {
     next(err)
   }

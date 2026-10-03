@@ -8,7 +8,7 @@ import { isRecord, pluralRu, unwrapUser, type Message, type ReadEntry, type User
 import { Avatar } from './Avatar';
 import { ConfirmModal } from './Modal';
 import { CallTargetModal } from './CallTargetModal';
-import { HashIcon, MenuIcon, PhoneIcon, SendIcon, TrashIcon, UsersIcon, VideoIcon, InfoIcon } from './icons';
+import { HashIcon, MenuIcon, PhoneIcon, SendIcon, TrashIcon, UsersIcon, VideoIcon, InfoIcon, BotIcon } from './icons';
 
 /* ---------------- formatting helpers ---------------- */
 
@@ -240,11 +240,21 @@ export function ChatPane({ channelId, onOpenNav }: ChatPaneProps) {
       }
     };
 
+    const onDeleted = (payload: unknown) => {
+      // message:deleted (удаление модератором или другим участником)
+      if (!isRecord(payload) || payload.channelId !== channelId) return;
+      const id = typeof payload.messageId === 'string' ? payload.messageId : null;
+      if (!id) return;
+      setMessages((prev) => prev.filter((m) => m.id !== id));
+    };
+
     socket.on('message:new', onNew);
+    socket.on('message:deleted', onDeleted);
     socket.on('typing', onTyping);
     socket.on('channel:read', onRead);
     return () => {
       socket.off('message:new', onNew);
+      socket.off('message:deleted', onDeleted);
       socket.off('typing', onTyping);
       socket.off('channel:read', onRead);
       Object.values(typingTimers.current).forEach((t) => window.clearTimeout(t));
@@ -329,12 +339,17 @@ export function ChatPane({ channelId, onOpenNav }: ChatPaneProps) {
     });
     sendTypingOff();
 
-    const res = await emitAck<{ ok?: boolean; message?: Message; error?: string }>(
-      socket,
-      'message:send',
-      { channelId, text, tempId },
-    );
-    if (res.ok && res.message && typeof res.message.id === 'string') {
+    const res = await emitAck<{
+      ok?: boolean;
+      message?: Message;
+      moderated?: boolean;
+      error?: string;
+    }>(socket, 'message:send', { channelId, text, tempId });
+    if (res.ok && res.moderated === true) {
+      // SPEC v9 §37: сообщение рассылалось и сразу удалено модератором —
+      // message:deleted уже убрал его из списка, ошибку не показываем
+      setMessages((prev) => prev.filter((m) => m.id !== tempId));
+    } else if (res.ok && res.message && typeof res.message.id === 'string') {
       const incoming = { ...res.message, tempId };
       setMessages((prev) => upsertMessage(prev, incoming, tempId));
       requestAnimationFrame(() => {
@@ -397,7 +412,9 @@ export function ChatPane({ channelId, onOpenNav }: ChatPaneProps) {
 
   const membersCount = detail?.members.length ?? 0;
   const isBotDm = !!dm && (dm.peer.username === 'atrium_bot' || dm.peer.id === 'u_bot');
-  const title = dm ? dm.peer.displayName : (channel?.name ? `#${channel.name}` : 'Чат');
+  // Фолбэк имени: у бота displayName может быть пустым — показываем @username.
+  const peerName = dm ? dm.peer.displayName.trim() || `@${dm.peer.username}` : '';
+  const title = dm ? peerName : (channel?.name ? `#${channel.name}` : 'Чат');
   const subtitle = isBotDm
     ? 'автоматические отчёты'
     : dm
@@ -475,6 +492,8 @@ export function ChatPane({ channelId, onOpenNav }: ChatPaneProps) {
           const next = messages[i + 1];
           const contiguous = !next || (next.sender.id === m.sender.id && formatDay(next.createdAt) === day);
           const canDelete = canDeleteMessage(m.sender.id, actor);
+          // Системные сообщения бота: пустой displayName → @username вместо пустого места.
+          const authorName = m.sender.displayName.trim() || `@${m.sender.username}`;
           return (
             <div key={m.id}>
               {showDay && (
@@ -501,8 +520,11 @@ export function ChatPane({ channelId, onOpenNav }: ChatPaneProps) {
                 <div className="body">
                   {showName && (
                     <div className="msg-meta">
-                      <span className="msg-author" style={own ? undefined : { color: m.sender.avatarColor }}>
-                        {own ? 'Вы' : m.sender.displayName}
+                      <span
+                        className="msg-author"
+                        style={own ? undefined : { color: m.sender.avatarColor || undefined }}
+                      >
+                        {own ? 'Вы' : authorName}
                       </span>
                       <span className="msg-time">{timeFmt.format(m.createdAt)}</span>
                     </div>
@@ -561,7 +583,7 @@ export function ChatPane({ channelId, onOpenNav }: ChatPaneProps) {
         </button>
         <div className="title">
           {dm ? (
-            <Avatar name={dm.peer.displayName} color={dm.peer.avatarColor} size={26} />
+            <Avatar name={peerName} color={dm.peer.avatarColor} size={26} />
           ) : (
             <HashIcon size={17} />
           )}
@@ -595,6 +617,15 @@ export function ChatPane({ channelId, onOpenNav }: ChatPaneProps) {
               <PhoneIcon size={16} />
             </button>
           </>
+        )}
+        {!dm && (
+          <button
+            className="icon-btn only-desktop"
+            title="Бот-модератор канала"
+            onClick={() => (panelOpen && panelTab === 'channel' ? closePanel() : openPanel('channel'))}
+          >
+            <BotIcon size={17} />
+          </button>
         )}
         {!isBotDm && (
           <button

@@ -153,6 +153,36 @@ CREATE TABLE IF NOT EXISTS payments (
 );
 CREATE INDEX IF NOT EXISTS payments_user ON payments(to_user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS payments_org ON payments(org_id, created_at DESC);
+
+-- ---------- SPEC v9 §37: бот-модератор каналов ----------
+CREATE TABLE IF NOT EXISTS channel_mod (
+  channel_id TEXT PRIMARY KEY,
+  messages INTEGER NOT NULL DEFAULT 0,
+  violations INTEGER NOT NULL DEFAULT 0,
+  last_rating_at INTEGER
+);
+
+-- ---------- SPEC v9 §40: привязанный банковский счёт пользователя ----------
+CREATE TABLE IF NOT EXISTS bank_accounts (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL UNIQUE,
+  holder TEXT NOT NULL,
+  number_masked TEXT NOT NULL,
+  last4 TEXT NOT NULL,
+  bank TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS bank_ops (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  type TEXT NOT NULL CHECK(type IN ('withdraw','topup')),
+  amount INTEGER NOT NULL CHECK(amount > 0),
+  status TEXT NOT NULL DEFAULT 'completed',
+  account_last4 TEXT NOT NULL,
+  bank TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS bank_ops_user ON bank_ops(user_id, created_at DESC);
 `)
 
 // ---- idempotent column migrations (SPEC v2 §10, v2.1 §17) ----

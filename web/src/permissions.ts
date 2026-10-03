@@ -72,6 +72,13 @@ export const canRemoveMember = (
 export const canViewStaffDocs = (rank: number): boolean => rank >= 40;
 
 /**
+ * Manage the channel moderator bot / request a chat rating — a channel member
+ * with rank ≥ 60 (SPEC v9 §37.1, §37.8). The server enforces the same rule;
+ * this only shapes the interface (status stays visible to everyone).
+ */
+export const canManageChannelModeration = (rank: number): boolean => rank >= 60;
+
+/**
  * Dismiss an employee (create a dismissal contract) / terminate unilaterally —
  * owner, assistant_owner, admin only (rank ≥ 60) and rank must exceed the
  * target's rank; the owner is untouchable (SPEC §19 + §12).

@@ -57,6 +57,8 @@ export interface AckResult {
 
 export interface ServerToClientEvents {
   'message:new': (payload: { message: Message }) => void;
+  /** Сообщение удалено (автором, другим участником или модератором, SPEC v9 §37). */
+  'message:deleted': (payload: { messageId: string; channelId: string }) => void;
   typing: (payload: { channelId: string; user: User; typing: boolean }) => void;
   'invite:new': (payload: {
     invite: Invite;
@@ -92,7 +94,13 @@ export interface ServerToClientEvents {
   /** Баланс кошелька изменился — только владельцу счёта (SPEC v4 §24, v6 §32 — число). */
   'wallet:updated': (payload: {
     balance: number;
-    reason?: 'topup' | 'transfer' | 'salary' | 'treasury_deposit';
+    reason?:
+      | 'topup'
+      | 'transfer'
+      | 'salary'
+      | 'treasury_deposit'
+      | 'bank_withdraw'
+      | 'bank_topup';
     from?: User;
     amount?: number;
   }) => void;
@@ -126,7 +134,7 @@ export interface ServerToClientEvents {
 export interface ClientToServerEvents {
   'message:send': (
     payload: { channelId: string; text: string; tempId?: string },
-    ack: (res: AckResult & { message?: Message }) => void,
+    ack: (res: AckResult & { message?: Message; moderated?: boolean }) => void,
   ) => void;
   typing: (payload: { channelId: string; typing: boolean }, ack?: (res: AckResult) => void) => void;
   'call:invite': (

@@ -27,6 +27,7 @@ import {
 } from '../util.js'
 import { canDeleteAnyMessage } from '../permissions.js'
 import { logActivity, phrases } from '../activity.js'
+import { emitToUser } from '../bus.js'
 
 const router = Router()
 router.use(['/dms', '/channels', '/messages'], requireAuth)
@@ -224,6 +225,12 @@ router.delete('/messages/:id', (req, res, next) => {
     }
 
     run('DELETE FROM messages WHERE id = ?', msg.id)
+
+    // live deletion for everyone in the channel (SPEC v9 §37: единый путь
+    // удаления — раньше события не было и открытые вкладки не видели удаления)
+    for (const uid of channelMemberIds(msg.channel_id)) {
+      emitToUser(uid, 'message:deleted', { messageId: msg.id, channelId: msg.channel_id })
+    }
 
     // SPEC v3 §18: log only staff deletions of other people's messages
     if (msg.sender_id !== req.userId && rankOf(member.role) >= 40) {

@@ -25,6 +25,8 @@ const KIND_ICONS: Record<PaymentKind, IconName> = {
   transfer: 'arrow-up-right',
   salary: 'briefcase',
   treasury_deposit: 'upload',
+  bank_withdraw: 'arrow-up-right',
+  bank_topup: 'arrow-down-left',
 };
 
 /** Строка истории операций кошелька / казначейства (SPEC v4 §24, тексты v5 §30). */

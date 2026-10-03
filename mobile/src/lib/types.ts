@@ -76,6 +76,8 @@ export interface Channel {
   createdAt: number;
   /** Непрочитанных сообщений (SPEC v3 §18). */
   unread?: number;
+  /** Бот-модератор состоит в канале (SPEC v9 §37). */
+  botInChannel?: boolean;
 }
 
 export interface Message {
@@ -216,7 +218,13 @@ export interface ReadEntry {
 
 // ---- Кошелёк и финансы организации (SPEC v4 §24–25) -----------------------
 
-export type PaymentKind = 'topup' | 'transfer' | 'salary' | 'treasury_deposit';
+export type PaymentKind =
+  | 'topup'
+  | 'transfer'
+  | 'salary'
+  | 'treasury_deposit'
+  | 'bank_withdraw'
+  | 'bank_topup';
 
 /** Строка payments как её отдаёт API (paymentRow на сервере). */
 export interface PaymentRow {
@@ -251,6 +259,29 @@ export interface WalletInfo {
   /** Поле остаётся в API, но в UI не отображается (SPEC v5 §30). */
   demo: boolean;
   payments: WalletPayment[];
+}
+
+// ---- Банковский счёт (SPEC v9 §40) -----------------------------------------
+
+/** Привязанный банковский счёт (номер хранится только маской). */
+export interface BankAccount {
+  id: string;
+  holder: string;
+  numberMasked: string;
+  last4: string;
+  bank: string;
+  createdAt: number;
+}
+
+/** Операция вывода/пополнения через банковский счёт. */
+export interface BankOp {
+  id: string;
+  type: 'withdraw' | 'topup';
+  amount: number;
+  status: string;
+  accountLast4: string;
+  bank: string;
+  createdAt: number;
 }
 
 /** Операция по казначейству организации (GET /api/orgs/:id/finance). */

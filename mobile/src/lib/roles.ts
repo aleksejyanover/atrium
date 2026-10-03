@@ -40,6 +40,11 @@ export function canCreateChannel(role: Role | null | undefined): boolean {
   return rankOf(role) >= 40;
 }
 
+/** Управлять ботом-модератором канала — rank ≥ 60 (SPEC v9 §37). */
+export function canManageModeration(role: Role | null | undefined): boolean {
+  return rankOf(role) >= 60;
+}
+
 /** View pending invites of org — rank ≥ 40. */
 export function canViewOrgInvites(role: Role | null | undefined): boolean {
   return rankOf(role) >= 40;
@@ -178,6 +183,7 @@ export const ROLE_MATRIX: RoleMatrixRow[] = [
   matrixRow('dismiss', 'Увольнять (договор об увольнении)', SENIOR),
   matrixRow('terminate', 'Расторгать договор в одностороннем порядке', SENIOR),
   matrixRow('roles', 'Менять роли', SENIOR, 'Админ назначает только роли ниже своей'),
+  matrixRow('bot', 'Управлять ботом-модератором канала', SENIOR, 'SPEC v9 §37'),
   matrixRow('org', 'Редактировать организацию и публичность', SENIOR),
   matrixRow('documents', 'Просматривать заявки и увольнения', STAFF),
   matrixRow('activity', 'Просматривать историю действий', EVERYONE),

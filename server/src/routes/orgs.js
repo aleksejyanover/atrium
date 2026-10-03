@@ -14,6 +14,8 @@ import {
   countOrgChannels,
   channelUnread,
   orgUnread,
+  isChannelMember,
+  BOT_ID,
   pendingDismissalUserIds,
   countPendingApplications,
   removeMemberFromOrg,
@@ -149,6 +151,7 @@ router.get('/orgs/:id', requireOrgMember, (req, res, next) => {
       name: c.name,
       createdAt: c.created_at,
       unread: channelUnread(c.id, req.userId),
+      botInChannel: isChannelMember(c.id, BOT_ID), // SPEC v9 §37
     }))
     res.json({
       org,
@@ -290,6 +293,7 @@ router.get('/orgs/:id/channels', requireOrgMember, (req, res, next) => {
     const channels = orgChannels(req.org.id).map((c) => ({
       ...publicChannel(c),
       unread: channelUnread(c.id, req.userId),
+      botInChannel: isChannelMember(c.id, BOT_ID), // SPEC v9 §37
     }))
     res.json({ channels })
   } catch (err) {

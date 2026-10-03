@@ -204,9 +204,15 @@ function ChatScreen() {
     refreshReads();
   });
 
-  // квитанции о прочтении других участников (SPEC v3 §18)
-  useSocketEvent('channel:read', (payload) => {
+  // сообщение удалено: автором, другим участником или модератором (SPEC v9 §37)
+  useSocketEvent('message:deleted', (payload) => {
     if (!channelId || payload.channelId !== channelId) return;
+    if (!payload.messageId) return;
+    setMessages((prev) => prev.filter((m) => m.id !== payload.messageId));
+  });
+
+  // квитанции о прочтении других участников (SPEC v3 §18)
+  useSocketEvent('channel:read', (payload) => {    if (!channelId || payload.channelId !== channelId) return;
     setReads((prev) => {
       const others = prev.filter((entry) => entry.userId !== payload.userId);
       return [...others, { userId: payload.userId, lastReadAt: payload.lastReadAt }];
@@ -269,6 +275,12 @@ function ChatScreen() {
       if (res?.error) {
         setMessages((prev) => prev.filter((m) => m.id !== tempId));
         setText((current) => current || value);
+        return;
+      }
+      if (res?.moderated) {
+        // SPEC v9 §37: сообщение было рассылано и сразу удалено модератором —
+        // событие message:deleted уже убрало его; черновик не восстанавливаем
+        setMessages((prev) => prev.filter((m) => m.id !== tempId));
         return;
       }
       const real = res?.message;
