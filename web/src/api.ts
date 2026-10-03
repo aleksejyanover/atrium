@@ -274,7 +274,14 @@ function normalizeActivity(raw: unknown): ActivityEntry | null {
 function normalizeWalletPayment(raw: unknown): WalletPayment | null {
   if (!isRecord(raw) || typeof raw.id !== 'string') return null;
   const kind = raw.kind;
-  if (kind !== 'topup' && kind !== 'transfer' && kind !== 'salary' && kind !== 'treasury_deposit') {
+  if (
+    kind !== 'topup' &&
+    kind !== 'transfer' &&
+    kind !== 'salary' &&
+    kind !== 'treasury_deposit' &&
+    kind !== 'bank_withdraw' &&
+    kind !== 'bank_topup'
+  ) {
     return null;
   }
   const cp = isRecord(raw.counterparty) ? raw.counterparty : null;

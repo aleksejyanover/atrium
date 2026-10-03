@@ -150,6 +150,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [socket, setSocket] = useState<Socket | null>(null);
 
   const [orgs, setOrgs] = useState<OrgWithRole[]>([]);
+  /** Список организаций уже хоть раз успешно загружался (чтобы не путать
+   *  «ещё не загружен» с «пользователь вышел из всех организаций» — SPEC v9 §39). */
+  const [orgsLoaded, setOrgsLoaded] = useState(false);
   const [currentOrgId, setCurrentOrgId] = useState<string | null>(() =>
     localStorage.getItem(LAST_ORG_KEY),
   );
@@ -204,6 +207,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       // SPEC v9 §39: один повтор через2с при сетевом сбое
       const list = await withRetry(() => api.listOrgs(), [2000]);
       setOrgs(list);
+      setOrgsLoaded(true);
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) return;
       toast(e instanceof Error ? e.message : 'Не удалось загрузить организации', 'error');
@@ -233,7 +237,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
         // org no longer accessible → reload the list and re-pick
         if (seq === detailSeq.current) {
           setDetail(null);
-          setDetailError(null);
+          // ошибку всё равно показываем: если re-pick не случится (организация
+          // осталась в списке) — пользователь увидит «Повторить», а не пустоту
+          setDetailError('Организация недоступна');
         }
         await refreshOrgs();
         return;
@@ -405,7 +411,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
   // Keep the selection valid when the org list changes (first load, leave, accept).
   useEffect(() => {
     if (orgs.length === 0) {
-      if (detail !== null) setDetail(null);
+      // Пустой список во время ЕЩЁ не загруженной загрузки (гонка: detail
+      // приходит раньше orgs) не должен затирать detail — это и была причина
+      // «пропадающих каналов» (SPEC v9 §39). Чистим только реальный выход
+      // из всех организаций.
+      if (orgsLoaded && detail !== null) setDetail(null);
       return;
     }
     const stored = currentOrgId && orgs.some((o) => o.id === currentOrgId)
@@ -417,7 +427,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
       setCurrentOrgId(target);
       localStorage.setItem(LAST_ORG_KEY, target);
     }
-  }, [orgs, currentOrgId, detail]);
+  }, [orgs, orgsLoaded, currentOrgId, detail]);
+
+  // SPEC v9 §39: страховка — detail «потерялся» при выбранной организации
+  // (обрыв, гонка очистки) → догружаем сами, без участия пользователя.
+  useEffect(() => {
+    if (orgs.length === 0 || !currentOrgId) return;
+    if (detail !== null || detailLoading || detailError) return;
+    void refreshDetail();
+  }, [orgs, currentOrgId, detail, detailLoading, detailError, refreshDetail]);
 
   // Membership changed → incoming applications may change too.
   useEffect(() => {

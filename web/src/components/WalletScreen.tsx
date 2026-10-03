@@ -1,6 +1,6 @@
 /** «Кошелёк»: баланс, пополнение счёта, переводы и история операций (SPEC v4 §24, v5 §30, v6 §32). */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, ApiError } from '../api';
 import { useApp } from '../store';
 import {
@@ -723,18 +723,32 @@ export function WalletScreen({ onOpenNav }: ScreenProps) {
     }
   }, []);
 
+  // SPEC v9 §39: у load не должно быть «живой» зависимости от user — раньше
+  // каждый успешный вызов updateUser менял identity load и эффект перезапускал
+  // загрузку заново (зацикленный поток запросов). Баланс в стор обновляем
+  // только при реально изменившемся числе.
+  const userRef = useRef(user);
+  userRef.current = user;
+  const balancePushed = useRef<number | null>(null);
+
   const load = useCallback(async () => {
     try {
       const data = await api.wallet();
       setBalance(data.balance);
       setPayments(data.payments);
-      if (user) updateUser({ ...user, balance: data.balance });
+      if (balancePushed.current !== data.balance) {
+        balancePushed.current = data.balance;
+        const u = userRef.current;
+        if (u) updateUser({ ...u, balance: data.balance });
+      }
       void loadBank();
     } catch (e) {
-      setPayments([]);
+      // Сбой обновления не должен стирать уже загруженную историю (§39);
+      // при самом первом сбое показываем пусто + тост.
+      setPayments((prev) => prev ?? []);
       toast(e instanceof Error ? e.message : 'Не удалось загрузить кошелёк', 'error');
     }
-  }, [user, updateUser, toast, loadBank]);
+  }, [updateUser, toast, loadBank]);
 
   useEffect(() => {
     void load();
