@@ -13,7 +13,7 @@ import {
   type WalletPayment,
 } from '../types';
 import { Avatar } from './Avatar';
-import { Modal } from './Modal';
+import { ConfirmModal, Modal } from './Modal';
 import { OwnerBadge } from './OwnerBadge';
 import {
   ArrowDownLeftIcon,
@@ -703,6 +703,7 @@ export function WalletScreen({ onOpenNav }: ScreenProps) {
   const [accBank, setAccBank] = useState('');
   const [accBusy, setAccBusy] = useState(false);
   const [accError, setAccError] = useState<string | null>(null);
+  const [showUnlink, setShowUnlink] = useState(false);
 
   // SPEC v6 §32: баланс — обычное число у всех, особой отметки для владельца нет
   const balanceDisplay = balance === null ? '…' : formatRub(balance);
@@ -917,7 +918,7 @@ export function WalletScreen({ onOpenNav }: ScreenProps) {
               <button className="btn btn-ghost" onClick={() => setShowBankTopup(true)}>
                 <ArrowDownLeftIcon size={15} /> Пополнить с карты
               </button>
-              <button className="btn btn-ghost" disabled={accBusy} onClick={() => void unlinkAccount()}>
+              <button className="btn btn-ghost" disabled={accBusy} onClick={() => setShowUnlink(true)}>
                 Отвязать
               </button>
             </div>
@@ -989,6 +990,18 @@ export function WalletScreen({ onOpenNav }: ScreenProps) {
             applyBalance(b);
             void loadBank();
           }}
+        />
+      )}
+      {showUnlink && bank?.account && (
+        <ConfirmModal
+          title="Отвязать счёт?"
+          text={`${bank.account.bank} ${bank.account.numberMasked} будет отвязан. История операций сохранится.`}
+          confirmLabel="Отвязать"
+          onConfirm={async () => {
+            setShowUnlink(false);
+            await unlinkAccount();
+          }}
+          onClose={() => setShowUnlink(false)}
         />
       )}
     </div>

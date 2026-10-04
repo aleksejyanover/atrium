@@ -6,6 +6,7 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { CallOverlays } from '@/components/call-overlay';
+import { ErrorBoundary } from '@/components/error-boundary';
 import { colors } from '@/lib/theme';
 import { AuthProvider } from '@/state/auth';
 import { CallProvider } from '@/state/call';
@@ -33,31 +34,33 @@ export default function RootLayout() {
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
-      <SafeAreaProvider>
-        <ThemeProvider value={theme}>
-          <AuthProvider>
-            <SocketProvider>
-              <OrgsProvider>
-                <ToastProvider>
-                  <RealtimeProvider>
-                    <CallProvider>
-                      <StatusBar style="light" />
-                      <Stack
-                        screenOptions={{
-                          headerShown: false,
-                          contentStyle: { backgroundColor: colors.bg },
-                          animation: 'slide_from_right',
-                        }}
-                      />
-                      <CallOverlays />
-                    </CallProvider>
-                  </RealtimeProvider>
-                </ToastProvider>
-              </OrgsProvider>
-            </SocketProvider>
-          </AuthProvider>
-        </ThemeProvider>
-      </SafeAreaProvider>
+      <ErrorBoundary>
+        <SafeAreaProvider>
+          <ThemeProvider value={theme}>
+            <AuthProvider>
+              <SocketProvider>
+                <OrgsProvider>
+                  <ToastProvider>
+                    <RealtimeProvider>
+                      <CallProvider>
+                        <StatusBar style="light" />
+                        <Stack
+                          screenOptions={{
+                            headerShown: false,
+                            contentStyle: { backgroundColor: colors.bg },
+                            animation: 'slide_from_right',
+                          }}
+                        />
+                        <CallOverlays />
+                      </CallProvider>
+                    </RealtimeProvider>
+                  </ToastProvider>
+                </OrgsProvider>
+              </SocketProvider>
+            </AuthProvider>
+          </ThemeProvider>
+        </SafeAreaProvider>
+      </ErrorBoundary>
     </GestureHandlerRootView>
   );
 }
